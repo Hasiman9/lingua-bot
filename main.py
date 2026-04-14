@@ -1,45 +1,100 @@
-from typing import Final 
+from typing import Final
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes  
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import random
+import logging
 
-# Constants
-TOKEN: Final = '7814310621:AAHIG6y7lCXVnjAUhYLANEtj0w92eLpDAaw'
+# ---------------- Logging Setup ----------------
+logging.basicConfig(level=logging.INFO)  # Eigene Logs sichtbar
+logging.getLogger("httpx").setLevel(logging.WARNING)  # Unterdrückt httpx INFO Logs
+logger = logging.getLogger(__name__)
+
+# ---------------- Constants ----------------
+TOKEN: Final = '7814310621:AAHBRQ_ItldIX3kwpRD6zc13kb-zqVZku-8'
 BOT_USERNAME: Final = '@linguamaterials_bot'
-FORWARD_TO_USER_ID: Final = '827718334'  
+FORWARD_TO_USER_ID: Final = '827718334'
 
+RESPONSES = [
+    'Thank you!',
+    'Got it! We’ll share it soon 📢',
+    'Thanks for your story 🙌',
+    'Appreciate it! Your input matters ❤️'
+]
 
-# Commands
+# ---------------- Command Handlers ----------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("Start command called")  # Debug statement to track executions
+    logger.info(f'User ({update.message.chat.id}) used /start')
     await update.message.reply_text(
-        ' LINGUA MATERIALS BOT \n\n This is your space to:\n\n❓ Ask professional questions \n📕 Share interesting, funny, or challenging experiences from your teaching practice \n💬 Start discussions on relevant topics in education \n\nAll stories, questions and ideas will be posted on Instagram (linguamaterials) and Telegram channel (ketro_eng) \n\nWrite your message down👇'
-    )
-async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("find documents")  # Debug statement to track executions
-    await update.message.reply_text(
-        'Available EMC’s + links on the channel now:\n\n•Kid’s Box New Generation (https://t.me/linguamaterials/11) \n•Kid’s Box Updated Second Edition (https://t.me/linguamaterials/31) \n•Eyes Open (https://t.me/linguamaterials/21) \n• English File 4th Edition (https://t.me/linguamaterials/38) \n• Gateway to the World (https://t.me/linguamaterials/70) \n• SpeakOut 2nd Edition (https://t.me/linguamaterials/120) \n• Wider World 2nd Edition (https://t.me/linguamaterials/143) \n• Go Getter (https://t.me/linguamaterials/150) \n• Family and Friends (https://t.me/linguamaterials/185) \n\nIf you didn’t find the necessary EMC you were looking for, write its name to the bot after the “starts the Bot” command. We will try to search for it and post it soon.'
+        'LINGUA MATERIALS BOT \n\n'
+        'This is your space to:\n\n'
+        '❓ Ask professional questions \n'
+        '📕 Share interesting, funny, or challenging experiences from your teaching practice \n'
+        '💬 Start discussions on relevant topics in education \n\n'
+        'All stories, questions and ideas will be posted on Telegram channel '
+        '<a href="https://t.me/linguamaterials">LINGUA MATERIALS</a> \n\n'
+        'Write your message down👇',
+        parse_mode="HTML"
     )
 
-# Response handler
+async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f'User ({update.message.chat.id}) used /emc')
+    await update.message.reply_text(
+        'Available EMC’s + links on the channel now:\n\n'
+        '• <a href="https://t.me/linguamaterials/11">Kid’s Box New Generation</a>\n'
+        '• <a href="https://t.me/linguamaterials/31">Kid’s Box Updated Second Edition</a>\n'
+        '• <a href="https://t.me/linguamaterials/21">Eyes Open</a>\n'
+        '• <a href="https://t.me/linguamaterials/38">English File 4th Edition</a>\n'
+        '• <a href="https://t.me/linguamaterials/70">Gateway to the World</a>\n'
+        '• <a href="https://t.me/linguamaterials/120">SpeakOut 2nd Edition</a>\n'
+        '• <a href="https://t.me/linguamaterials/143">Wider World 2nd Edition</a>\n'
+        '• <a href="https://t.me/linguamaterials/150">Go Getter</a>\n'
+        '• <a href="https://t.me/linguamaterials/185">Family and Friends</a>\n\n'
+        'If you didn’t find the EMC you were looking for, write its name to the bot after the “start” command. We will try to search for it and post it soon.',
+        parse_mode="HTML"
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f'User ({update.message.chat.id}) used /help')
+    await update.message.reply_text(
+        "Available commands:\n"
+        "/start - Learn how to use this bot\n"
+        "/emc - Find links to educational materials\n"
+        "/help - Show this help message\n\n"
+        "Or just type your question/story directly 👇"
+    )
+
+# ---------------- Response & Forward ----------------
 def handle_response(text: str) -> str:
     processed: str = text.lower()
-    if len(processed) < 10000:
-        response = "Thank you! Stay tuned for your question to be featured on our Instagram page: @linguamaterials. All submissions remain completely anonymous. 👀 \nTo submit another question, feel free to send the /start command again."
+    if len(processed) < 1000:
+        return random.choice(RESPONSES)
     else:
-        response = "Thank you for sharing your story with me!"
-    return response       
+        return "Thank you for sharing your detailed story with us! 🙏"
 
-# Function to forward messages to your personal Telegram account
 async def forward_message_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = update.message.text
-    await context.bot.send_message(chat_id=FORWARD_TO_USER_ID, text=f"User {update.message.chat.id} sent: {message_text}")
+    user_id = update.effective_user.id
+    try:
+        await context.bot.copy_message(
+            chat_id=FORWARD_TO_USER_ID,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.effective_message.id
+        )
+        text = (getattr(update.effective_message, "text", None)
+                or getattr(update.effective_message, "caption", None)
+                or "<no text/caption>")
+        await context.bot.send_message(
+            chat_id=FORWARD_TO_USER_ID,
+            text=f"[from {user_id}] {text}"
+        )
+        logger.info(f"Forwarded message from {user_id}: {text}")
+    except Exception as e:
+        logger.error(f"Forward failed from {user_id}: {e}")
 
-# Message handler
+# ---------------- Message Handlers ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_type: str = update.message.chat.type
     text: str = update.message.text
-
-    print(f'User ({update.message.chat.id}) in {message_type}: "{text}"')
+    logger.info(f'User ({update.message.chat.id}) sent message: "{text}"')
 
     if message_type == 'group':
         if BOT_USERNAME in text:
@@ -50,31 +105,107 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         response: str = handle_response(text)
 
-    # Forward message to your user ID
     await forward_message_to_user(update, context)
+    await update.message.reply_text(response, parse_mode="HTML")
 
-    print('BOT:', response)
-    await update.message.reply_text(response)             
+async def handle_non_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat_type = update.effective_chat.type
 
-# Error handler
-async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f'Update {update} caused error {context.error}')
+    # Detect media type
+    media_type = None
+    file_name = None
 
-# Main code
+    if msg.photo:
+        media_type = "photo"
+        file_name = msg.photo[-1].file_id
+    elif msg.video:
+        media_type = "video"
+        file_name = msg.video.file_id
+    elif msg.document:
+        media_type = "document"
+        file_name = msg.document.file_name or msg.document.file_id
+    elif msg.audio:
+        media_type = "audio"
+        file_name = msg.audio.file_id
+    elif msg.voice:
+        media_type = "voice"
+        file_name = msg.voice.file_id
+    elif msg.sticker:
+        media_type = "sticker"
+        file_name = msg.sticker.file_id
+    else:
+        media_type = "unknown"
+        file_name = "<no file_id>"
+
+    logger.info(
+        f"User ({msg.chat.id}) sent {media_type}: {file_name}, caption: {msg.caption}"
+    )
+
+    if chat_type == 'group' and BOT_USERNAME not in (msg.caption or ""):
+        return
+
+    await forward_message_to_user(update, context)
+    await msg.reply_text(
+        "Thanks! We received your media. Your submission will remain anonymous. 👀"
+    )
+
+# ---------------- Admin Reply ----------------
+async def reply_to_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, text: str):
+    try:
+        await context.bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+        logger.info(f"Sent private reply to user {user_id}: {text}")
+    except Exception as e:
+        logger.error(f"Failed to send private reply to {user_id}: {e}")
+
+async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_chat.id) != FORWARD_TO_USER_ID:
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /reply <user_id> <message>")
+        return
+
+    try:
+        user_id = int(context.args[0])
+        text = " ".join(context.args[1:])
+        await reply_to_user(context, user_id, text)
+        await update.message.reply_text(f"✅ Replied to {user_id}")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user_id format.")
+
+# ---------------- Unknown Command ----------------
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f'User ({update.message.chat.id}) used unknown command: "{update.message.text}"')
+    await update.message.reply_text("Sorry, I don’t recognize that command. Try /help 🙂")
+
+# ---------------- Error Handler ----------------
+async def error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error(f"Update {update} caused error: {context.error}")
+
+# ---------------- Main ----------------
 if __name__ == '__main__':
-    print('Starting bot...')
     app = Application.builder().token(TOKEN).build()
 
     # Commands
     app.add_handler(CommandHandler('start', start_command))
-    #find
     app.add_handler(CommandHandler('emc', find_command))
-    # Messages
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
+    app.add_handler(CommandHandler('help', help_command))
+    app.add_handler(CommandHandler('reply', reply_command))
 
-    # Errors
+    # Text Messages
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Non-text Messages (media)
+    app.add_handler(MessageHandler(~filters.TEXT & ~filters.COMMAND, handle_non_text_message))
+
+    # Unknown commands
+    app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    # Error handler
     app.add_error_handler(error)
 
-    # Poll the bot
-    print('Polling...')
+    logger.info("Bot is starting polling...")
     app.run_polling()
+
