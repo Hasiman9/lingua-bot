@@ -10,9 +10,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)  # Unterdrückt httpx INFO 
 logger = logging.getLogger(__name__)
 
 # ---------------- Constants ----------------
-TOKEN: Final = '7814310621:AAHBRQ_ItldIX3kwpRD6zc13kb-zqVZku-8'
+TOKEN: Final = ''
 BOT_USERNAME: Final = '@linguamaterials_bot'
-FORWARD_TO_USER_ID: Final = '827718334'
+FORWARD_TO_USER_ID: Final = ''
 
 RESPONSES = [
     'Thank you!',
