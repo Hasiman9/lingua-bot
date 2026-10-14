@@ -176,6 +176,30 @@ Keep only this polling instance active and disable Botmother first. No web app, 
 systemd service, cron delivery job, or server timezone change is needed on PythonAnywhere.
 Always-on availability depends on the hosting plan; the bot itself needs no external scheduler.
 
+### Diagnosing Always-on startup
+
+Startup logs now show the Python executable, working directory, configuration file and database
+paths, campaign time, and each PTB lifecycle stage. They do not print the bot token or materials URL.
+Tracebacks are retained with token redaction. The expected sequence is:
+
+1. Configuration loaded; Telegram Application created.
+2. Telegram Application initialized successfully (`getMe` completed).
+3. SQLite opened, command menu registered, delivery scheduler job registered.
+4. Starting Telegram polling (webhook removal / `getUpdates` bootstrap).
+5. Polling startup completed; Telegram Application started successfully.
+
+The scheduler-registration message alone is **not** evidence that polling started. If it is the
+last checkpoint, inspect subsequent polling/bootstrap logs. A blank materials URL disables only
+delivery, not subscription handling. `run_polling()` remains the blocking long-running entry point;
+startup failures exit unsuccessfully without an added retry loop. PythonAnywhere supervises restarts.
+
+Stop any manually running Bash instance before starting the Always-on task. Compare the logged
+Python executable and configuration/database paths against the working manual run. Use the absolute
+virtualenv command above, without `&`, `nohup`, or a shell wrapper that exits immediately. Competing
+instances can cause a database-lock failure or a Telegram `Conflict` error (including on another host).
+The bot's logs identify application startup; PythonAnywhere's dashboard task status is managed by
+the host and cannot be diagnosed from the scheduler-registration message alone.
+
 ## Linux VPS / systemd
 
 Install Python, venv support, and Git using your Linux distribution's package manager. For Ubuntu:
