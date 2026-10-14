@@ -95,7 +95,7 @@ async def on_startup(application):
                               settings.campaign_at, message=settings.materials_message)
     application.bot_data["service"] = service
     logger.info("Registering /start command with Telegram")
-    await application.bot.set_my_commands([BotCommand("start", "Get free educational materials")])
+    await application.bot.set_my_commands([BotCommand("start", "Start")])
     logger.info("Registering delivery scheduler job (interval=%s seconds)", config.POLL_SECONDS)
     application.job_queue.run_repeating(service.tick, interval=config.POLL_SECONDS, first=1,
                                         job_kwargs={"max_instances": 1, "coalesce": True})
