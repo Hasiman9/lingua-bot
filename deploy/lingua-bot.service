@@ -1,0 +1,22 @@
+[Unit]
+Description=Lingua subscription and materials bot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=linguabot
+Group=linguabot
+WorkingDirectory=/opt/lingua-bot
+EnvironmentFile=/opt/lingua-bot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/lingua-bot/.venv/bin/python /opt/lingua-bot/main.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=120
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
