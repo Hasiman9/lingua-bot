@@ -17,8 +17,13 @@ class StartupSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.enterContext(patch.dict("os.environ", {}, clear=True))
-        self.enterContext(patch.object(config, "BASE_DIR", self.root))
+        for patcher in (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(config, "BASE_DIR", self.root),
+            patch.object(config, "WELCOME", "Campaign delivery: {campaign_time}"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def write_env(self, url=""):
         (self.root / ".env").write_text(
