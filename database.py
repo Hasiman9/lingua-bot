@@ -30,14 +30,7 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries(status, next_attempt_at);
         """)
-        # The exclusive process lock is held before open(): interrupted work is recoverable.
-        await self.connection.execute("UPDATE deliveries SET status='pending' WHERE status='processing'")
-        # Migrate old per-user delays, or a changed campaign date, without losing progress.
-        # Unchanged dates retain API retry backoff across restarts. Completed rows stay final.
-        await self.connection.execute("""
-            UPDATE deliveries SET scheduled_at=?, next_attempt_at=?
-            WHERE status != 'delivered' AND scheduled_at != ?
-        """, (campaign_at, campaign_at, campaign_at))
+        # Legacy records are history/eligibility, never an automatically runnable queue.
         await self.connection.commit()
 
     async def close(self):
@@ -57,11 +50,7 @@ class Database:
                 INSERT INTO deliveries
                 (user_id, first_verified_at, scheduled_at, verification_state, status, next_attempt_at)
                 VALUES (?, ?, ?, 'initial_passed', 'pending', ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    scheduled_at=excluded.scheduled_at,
-                    next_attempt_at=excluded.scheduled_at,
-                    verification_state='initial_passed', status='pending', retry_attempts=0
-                WHERE deliveries.status IN ('awaiting_subscription', 'blocked')
+                ON CONFLICT(user_id) DO NOTHING
             """, (user_id, now, campaign_at, campaign_at))
             await self.connection.commit()
         return await self.get(user_id)

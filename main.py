@@ -10,6 +10,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 import config
 from database import Database
+from campaigns import CampaignStore
 from materials import validate_materials
 from scheduler import DeliveryService
 from subscriptions import keyboard
@@ -90,6 +91,7 @@ async def on_startup(application):
     settings = application.bot_data["settings"]
     db = Database(settings.database_path)
     await db.open(settings.campaign_at.timestamp())
+    CampaignStore(settings.database_path).initialize()
     application.bot_data["database"] = db
     service = DeliveryService(db, application.bot, config.CHANNELS, settings.materials_url,
                               settings.campaign_at, message=settings.materials_message)
@@ -100,8 +102,7 @@ async def on_startup(application):
     application.job_queue.run_repeating(service.tick, interval=config.POLL_SECONDS, first=1,
                                         job_kwargs={"max_instances": 1, "coalesce": True})
     logger.info("Persistent delivery scheduler registered; starts with Telegram Application")
-    if not settings.materials_url:
-        logger.info("Materials delivery disabled: MATERIALS_URL is empty; subscription verification is available")
+    logger.info("Only explicitly activated SQLite campaigns can deliver materials")
     logger.info("Post-initialization complete; starting Telegram polling (webhook removal/getUpdates bootstrap)")
 
 

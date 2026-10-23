@@ -1,235 +1,175 @@
-# Lingua educational materials bot
+# Lingua materials bot
 
-An asynchronous `python-telegram-bot` polling bot with one command, `/start`.
-Users subscribe to six channels and press one confirmation button. All six memberships
-must pass both initial verification and automatic verification before delivery.
-No anonymous submissions, forwarding, admin replies, EMC links, or message-response handlers remain.
+The existing polling bot verifies all six channels on confirmation. Materials are now
+sent only by an **explicitly activated, one-time SQLite campaign**. Deploying, editing
+configuration, starting the bot, and previewing do not activate delivery.
 
-## Configure before running
+## One-time delivery policy
 
-1. Put the **existing** `@linguamaterials_bot` token in the local `.env` file as `BOT_TOKEN`.
-   The old source contained an empty token, so no token could be migrated.
-   On a fresh checkout, copy `.env.example` to `.env`. Never commit `.env`.
-2. Configure the fixed campaign date and Krasnoyarsk local time in `.env`:
-   ```dotenv
-   CAMPAIGN_DATE=2026-10-22
-   CAMPAIGN_TIME=16:00
-   CAMPAIGN_TIMEZONE=Asia/Krasnoyarsk
-   ```
-   These are the defaults. Change `CAMPAIGN_TIME` to the desired 24-hour `HH:MM` time.
-   October 22, 2026 at **16:00 Asia/Krasnoyarsk (UTC+7)** is **09:00 UTC** or
-   **11:00 Europe/Berlin (CEST)** on the same day. All eligible users share this fixed timestamp.
-   Python's `zoneinfo` resolves the IANA timezone independently of the server timezone.
-   Invalid dates, timezones, and ambiguous/nonexistent DST wall times are rejected.
-   The old per-user delay setting is no longer used.
-3. Set `DATABASE_PATH=data/bot.sqlite3`, or an absolute persistent path.
-   Relative paths resolve against the project directory.
-4. Edit `CHANNELS` in `config.py`: Channel 1 is `@linguamaterials`; replace Channels 2–6.
-   Each needs a unique `chat_id`, display `name`, and `https://t.me/…` join URL.
-   Public IDs use `@username`; private IDs must be negative **integers** (normally `-100…`),
-   paired with valid invitation links. Placeholders deliberately prevent startup.
-5. Add the bot as an **administrator in every required channel**. The bot checks its
-   own admin status at verification time, because Telegram only guarantees checks of
-   other users when the bot is an administrator. For private channels, add the bot directly
-   and obtain the real numeric chat ID. Pending join requests do not count as membership.
-6. In the project-root **`.env`**, set **`MATERIALS_URL`** to your real collection link
-   (for example, your actual shared folder or materials page). It is blank by default:
-   ```dotenv
-   MATERIALS_URL=
-   ```
-   Blank means no materials message is sent; eligible deliveries remain pending. Invalid URLs
-   and known placeholders such as `example.com` are rejected. Check that your real HTTP(S) link
-   works for recipients; the bot does not inspect its contents or sharing permissions.
-7. In **`config.py`**, edit **`MATERIALS_MESSAGE`** to change the single message's plain text.
-   The message automatically includes one inline button labeled **🎁 Get Materials**, pointing
-   to `MATERIALS_URL`. No HTML formatting is needed. No PDF, video, or individual file is sent.
-   Restart the bot after changing the URL or message. Completed users are not sent another message.
+- `campaign.py activate --confirm` stores the activation time and activation + **300 seconds**
+  as UTC Unix timestamps in the existing SQLite database.
+- Activation atomically snapshots previously verified users from `deliveries`.
+  Users who first verify after activation are not added to that campaign.
+- Existing subscribers, subscription records, legacy dates and delivery history stay intact.
+  New `campaigns` and `campaign_recipients` tables hold campaign state and history.
+- Legacy completed deliveries and any user with a new delivered receipt are excluded.
+  Legacy `processing` records are conservatively excluded because their send outcome is unknown.
+- Immediately before every send (including safe retries), all six channels are checked again.
+  The bot must be an administrator in each channel. Missing membership skips that user for
+  this campaign; confirming again does not reopen it. Verification API errors retry with backoff.
+- The exact text below is persisted with the campaign and sent in **one plain-text message**,
+  with no inline button, formatting or link preview:
 
-Welcome text, channel names, and confirmation/retry labels are editable in `config.py`.
+```text
+🎁✨Спасибо за доверие, вот ваши материалы-подарочки:
 
-### Configuration flow and subscription-only testing
-
-`config.load_settings()` loads the project-root `.env` **before** reading environment values.
-Existing process environment variables take precedence over `.env` (including an explicitly
-empty `MATERIALS_URL`). It validates and returns a single `Settings` object containing `token`,
-`campaign_at`, `database_path`, `materials_url`, and `materials_message`.
-`materials_message` comes from the editable `MATERIALS_MESSAGE` constant in `config.py`;
-it is not an environment variable and does not embed a URL at import time. Startup passes the
-loaded URL and message explicitly to the delivery service. The sender attaches the URL button.
-
-For local subscription testing, leave `MATERIALS_URL=` blank. `/start` and both subscription
-confirmation/retry buttons remain usable; no materials message is sent even if the campaign
-is overdue. The message text may also be empty in this mode. To enable delivery later, configure
-a real URL and nonempty message, then restart. Already eligible, overdue users can then receive
-the message after a successful fresh six-channel check. Invalid/placeholder URLs fail validation.
-
-The automated startup smoke tests load a temporary `.env`, construct the real PTB application,
-exercise startup/shutdown hooks and SQLite, and mock all Telegram calls. They never start polling:
-
-```powershell
-.venv\Scripts\python -m unittest discover -s tests -p test_startup.py -v
+https://drive.google.com/drive/folders/1lvzrprek8YgQt42iv7BWS9eSveJUFm-W?usp=sharing
 ```
 
-## Local installation / VS Code
+- Scheduler scans occur every 30 seconds, in batches of 25. Delivery starts on the first
+  scan at/after the stored time; checks, recipient count and Telegram limits can delay receipt.
+- Restarts retain the countdown and retry backoff. An explicitly activated campaign resumes
+  after downtime, even if its deadline passed. Old campaigns are never automatically activated.
+- Campaigns finish once there are no pending/in-flight recipients. Missing subscriptions,
+  blocked users and uncertain sends are terminal for that campaign. Verification outages and
+  explicit rate limits keep it active until safe retries finish.
+- Reusing a campaign ID fails without changing anything. A second campaign cannot be activated
+  while one is active. Completed campaigns and their timestamps are never changed.
 
-Python 3.10+ is required (3.12+ recommended for a new server). Open this folder in VS Code.
-In its terminal:
+### Duplicate prevention
 
-```powershell
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python -m unittest discover -s tests -v
-.venv\Scripts\python main.py
-```
+The sender commits `sending` **before** calling Telegram. A timeout or unexpected send error
+becomes `uncertain`; interrupted `sending` records become `uncertain` on restart. These users
+are excluded from future campaigns too. They are not retried automatically, because Telegram
+has no send idempotency key. This favors avoiding duplicates: a crash before the request may
+leave someone unsent and held for review. An explicit Telegram rate-limit rejection can retry;
+each retry rechecks membership. Interrupted pre-send verification can safely resume.
 
-Use **Python: Select Interpreter** to select `.venv`, then **Run Python File** on `main.py`.
-On Linux/macOS use `.venv/bin/python` instead. Stop with Ctrl+C. Tests use mocked Telegram
-responses and temporary databases; no token or live channels are required.
+Preview reports `uncertain` counts. For investigation, inspect `campaign_recipients` by
+`campaign_id` and `user_id`; do not reset these records blindly.
 
-## Disable Botmother before polling
+## Deploy safely on PythonAnywhere through GitHub
 
-Stop/disable the existing bot's flows or integration in Botmother and disconnect its Telegram
-connection using its current dashboard controls. Do not delete the Telegram bot or create a new one.
-Stop every older Python instance or hosting deployment using the same token as well.
-Starting `run_polling()` removes the Telegram webhook; Botmother must remain disabled so it
-does not reinstall that webhook. This bot drops queued old updates on polling startup.
-If a polling conflict occurs, stop the competing instance/integration before restarting.
-Clear any old language-specific or chat-scoped command menus through BotFather if present;
-startup replaces the default menu with `/start`.
+Use the existing project directory, virtualenv, `.env`, database and Always-on task.
+The commands below assume the project is `~/lingua-bot` and its environment is `.venv`.
+If the existing task uses another virtualenv, use its Python executable for these commands too.
+If `start-bot.sh` exports `DATABASE_PATH`, use the **same exported value** in the console.
+Verify the database path printed by preview matches the bot startup log.
 
-## Persistent scheduling and verification policy
+### 1. Review the published commit
 
-SQLite stores user ID, first verification, due time, verification state, latest second verification,
-delivery state/time, attempts, next retry time, and acknowledgment progress (1 for the sent link).
-Timestamps are UTC Unix seconds. Async SQLite operations run through `aiosqlite` and serialized
-writes. A process-level file lock prevents two instances sharing this database; an async service
-lock prevents simultaneous confirmation/delivery. Run **one process on one server** with local
-storage, not multiple replicas or a network-mounted SQLite database.
+Use the existing checkout of `https://github.com/Hasiman9/lingua-bot` on branch `main`.
+The update contains no `.env`, database, virtualenv or `start-bot.sh`.
+Do not replace the project with a fresh checkout or reset local server changes.
 
-The scheduler scans persistent due work every 30 seconds, including overdue work after startup.
-Successful initial verification records eligibility (`initial_passed`, `pending`) and the same
-fixed campaign timestamp for every user. Nothing is sent before this timestamp. Delivery begins
-on the first scan at/after it and proceeds sequentially in batches; API limits, user count, and
-outages can delay completion, so simultaneous receipt at the exact second is not guaranteed.
-Interrupted `processing` rows recover as `pending`. Duplicate confirmation clicks never move
-an existing pending due time or create a second delivery. Completed users receive no repeat campaign.
-All six subscriptions are rechecked immediately before **the materials message**, including retries.
-`member`, `administrator`, `creator`/`owner`, and `restricted` with `is_member=True` pass.
-Missing membership pauses delivery and sends missing-channel links plus one retry button.
+### 2. Stop the old task, back up, and install
 
-Rejoining users who confirm again retain the fixed campaign date; no new delay begins.
-Late initial confirmations are also accepted and processed on the next scan, with another
-automatic verification of all six channels. First verification and acknowledged delivery status
-are preserved. There is no registration cutoff or automatic second campaign.
-
-On startup, unfinished legacy delay-based schedules migrate to the configured campaign timestamp.
-Changing the campaign configuration and restarting similarly reschedules unfinished users
-without unblocking missing subscriptions.
-Completed deliveries are never rescheduled. Restarts with the same timestamp preserve retry backoff.
-Back up the existing SQLite database before upgrading; no manual schema reset is needed.
-Existing unfinished multi-file deliveries now receive the one link message after verification,
-regardless of their old file progress. Old completed deliveries remain completed. The legacy
-`manifest` column is retained for database compatibility but is no longer used for delivery.
-
-API failures and missing admin rights never count as successful verification or genuine
-unsubscription. Delivery stays pending with exponential backoff from 60 seconds to a maximum
-of one hour, continuing until recovery; Telegram's explicit longer RetryAfter is respected for
-send failures. Logs identify channel names and error types, not token-bearing request URLs.
-Users who block the bot are marked `blocked`; after unblocking they can use `/start` and confirm
-again. A blank `MATERIALS_URL` also waits and retries without sending any materials message.
-
-After Telegram acknowledges the single message, progress, delivery status, and delivery time
-are committed together in SQLite. Subsequent scans, confirmation clicks, restarts, or configuration
-changes do not resend completed deliveries. Failed sends stay pending (or blocked if the user
-blocked the bot), and any retry must pass all six membership checks again.
-
-Telegram does not offer an idempotency key for sends: a crash after Telegram accepts a message but
-before SQLite commits, or an ambiguous network timeout, can duplicate that message. Checkpointing
-reduces duplicates but cannot guarantee exactly-once sending. Likewise, membership checks are
-snapshots; Telegram cannot atomically combine six checks with a send. Every send here requires a
-fresh successful check of all six channels, and any known missing subscription or API error stops it.
-
-## PythonAnywhere Always-on task
-
-Use a PythonAnywhere account with Always-on tasks and outbound Telegram API access enabled.
-In a Bash console, with this project uploaded to `/home/YOUR_USERNAME/lingua-bot`:
+In PythonAnywhere's Tasks page, **stop the existing Always-on task before replacing code**.
+The old code can still send overdue deliveries until stopped. Do not start a second polling process.
+In a PythonAnywhere Bash console:
 
 ```bash
-cd /home/YOUR_USERNAME/lingua-bot
-python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+cd ~/lingua-bot
+.venv/bin/python - <<'PY'
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path.cwd() / '.env')
+path = Path(os.getenv('DATABASE_PATH', 'data/bot.sqlite3')).resolve()
+target = path.with_name(path.name + '.backup-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+source = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+backup = sqlite3.connect(target)
+source.backup(backup)
+backup.close()
+source.close()
+print('Backed up', path, 'to', target)
+PY
+git status --short --branch
+git pull --ff-only origin main
 .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python campaign.py preview
 ```
 
-Configure `.env` as above; set `DATABASE_PATH` to
-`/home/YOUR_USERNAME/lingua-bot/data/bot.sqlite3`. Keep this persistent database directory
-through updates. In the Tasks page, add **one Always-on task** with this command:
+Review the changed files and test output. Before first startup the preview can read the legacy
+database without migrating it; it should show no activated campaigns and zero pending campaign
+deliveries. `eligible` means recorded initial verification, **not** live membership verification.
+If Git reports local changes or refuses the fast-forward, resolve that separately before
+continuing; do not use `git reset --hard` or `git clean` on the production checkout.
+
+### 3. Start the existing Always-on task and preview
+
+Start the same task again from the Tasks page with its **existing command**, including
+`start-bot.sh` if used. `main.py` remains the entry point; no cron or new task is needed.
+The wrapper is not present in this repository and is not replaced by this deployment.
+Wait for the log line `Telegram Application started successfully; long polling is running`.
+Then run:
 
 ```bash
-/home/YOUR_USERNAME/lingua-bot/.venv/bin/python -u /home/YOUR_USERNAME/lingua-bot/main.py
+cd ~/lingua-bot
+.venv/bin/python campaign.py preview
 ```
 
-The bot loads `.env` relative to its own source directory, so it does not depend on the task's
-working directory. Use the task's log link for output and its restart controls after configuration
-changes. Always-on task supervision handles process restarts; SQLite recovers overdue work.
-Keep only this polling instance active and disable Botmother first. No web app, webhook,
-systemd service, cron delivery job, or server timezone change is needed on PythonAnywhere.
-Always-on availability depends on the hosting plan; the bot itself needs no external scheduler.
+Startup adds campaign tables but does not schedule anything. Preview opens SQLite read-only;
+it reports UTC scheduled times, eligible counts, and counts by recipient status including pending.
+Neither operator command connects to Telegram. Activation can run while the bot is running;
+SQLite transactions serialize activation and scheduler work.
 
-### Diagnosing Always-on startup
-
-Startup logs now show the Python executable, working directory, configuration file and database
-paths, campaign time, and each PTB lifecycle stage. They do not print the bot token or materials URL.
-Tracebacks are retained with token redaction. The expected sequence is:
-
-1. Configuration loaded; Telegram Application created.
-2. Telegram Application initialized successfully (`getMe` completed).
-3. SQLite opened, command menu registered, delivery scheduler job registered.
-4. Starting Telegram polling (webhook removal / `getUpdates` bootstrap).
-5. Polling startup completed; Telegram Application started successfully.
-
-The scheduler-registration message alone is **not** evidence that polling started. If it is the
-last checkpoint, inspect subsequent polling/bootstrap logs. A blank materials URL disables only
-delivery, not subscription handling. `run_polling()` remains the blocking long-running entry point;
-startup failures exit unsuccessfully without an added retry loop. PythonAnywhere supervises restarts.
-
-Stop any manually running Bash instance before starting the Always-on task. Compare the logged
-Python executable and configuration/database paths against the working manual run. Use the absolute
-virtualenv command above, without `&`, `nohup`, or a shell wrapper that exits immediately. Competing
-instances can cause a database-lock failure or a Telegram `Conflict` error (including on another host).
-The bot's logs identify application startup; PythonAnywhere's dashboard task status is managed by
-the host and cannot be diagnosed from the scheduler-registration message alone.
-
-## Linux VPS / systemd
-
-Install Python, venv support, and Git using your Linux distribution's package manager. For Ubuntu:
+### 4. Explicitly activate only when ready
 
 ```bash
-sudo apt update
-sudo apt install python3 python3-venv git
-sudo useradd --system --create-home --home-dir /opt/lingua-bot linguabot
+cd ~/lingua-bot
+.venv/bin/python campaign.py activate --confirm
+.venv/bin/python campaign.py preview
 ```
 
-Copy this project to `/opt/lingua-bot`, create its private `.env`, and configure channels/materials.
-Then:
+**The five-minute countdown begins at successful activation**, not deployment or restart.
+The default campaign ID is `materials-five-minute-v1`. Repeating the command fails safely and
+does not reset the countdown or reopen completed deliveries. No restart is required after activation.
+
+### Future delivery date
+
+After the current campaign is completed, choose a new ID and a future UTC date:
 
 ```bash
-sudo chown -R linguabot:linguabot /opt/lingua-bot
-sudo chmod 600 /opt/lingua-bot/.env
-sudo -u linguabot python3 -m venv /opt/lingua-bot/.venv
-sudo -u linguabot /opt/lingua-bot/.venv/bin/python -m pip install -r /opt/lingua-bot/requirements.txt
-sudo cp /opt/lingua-bot/deploy/lingua-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now lingua-bot
-sudo systemctl status lingua-bot
-sudo journalctl -u lingua-bot -f
+.venv/bin/python campaign.py activate --id materials-december-2026 --at 2026-12-01T09:00:00Z --confirm
+.venv/bin/python campaign.py preview
 ```
 
-The supplied service restarts automatically after failures and starts at boot. After configuration
-or code changes: `sudo systemctl restart lingua-bot`. To stop: `sudo systemctl stop lingua-bot`.
-Keep `.env` and the database outside disposable build directories and preserve them
-across deployments. The service user needs write permission on the database directory (including
-SQLite WAL/SHM and lock files). For backups, stop the service, copy the database and associated
-WAL/SHM files if present, then restart; alternatively use SQLite's online backup API. Never delete
-the database on redeploy: doing so loses schedules and deduplication history. No paid services,
-public HTTP endpoint, or bot-building platform are required.
+Replace the example with your desired **future** date. Naive, non-UTC and past timestamps are
+rejected. This is another one-time campaign of the same materials; users already delivered or
+held as uncertain are excluded. New materials with a separate receipt policy would require a
+separate change; changing the campaign ID alone does not resend these materials.
+
+## Configuration and operation
+
+- Keep the existing `BOT_TOKEN` and `DATABASE_PATH` in `.env`. Relative database paths resolve
+  against the project directory. Existing process environment takes precedence over `.env`.
+- `CHANNELS` in `config.py` must contain exactly six distinct channels. The bot needs admin
+  rights in each. `member`, `administrator`, `creator`/`owner`, and restricted users with
+  `is_member=True` pass; pending join requests do not.
+- The legacy `CAMPAIGN_DATE`, `CAMPAIGN_TIME`, `CAMPAIGN_TIMEZONE`, `MATERIALS_URL` and
+  `MATERIALS_MESSAGE` remain load-compatible but do not schedule or control this explicit
+  campaign. The fixed message is in `campaigns.py`. A blank legacy URL does not disable an
+  explicitly activated campaign. The legacy configuration must still pass its existing validation.
+- Keep only one polling process, using the existing process lock. Disable Botmother or any
+  competing webhook/poller. No web app, webhook, timezone change or external scheduler is needed.
+- Startup logs show configuration/database paths and lifecycle stages with token redaction.
+  The scheduler-registration log alone does not mean polling has started.
+- Keep `.env` and the persistent database through updates. Do not delete the database or
+  copy a local test database over production. Use SQLite's backup API for consistent backups.
+
+## Local tests
+
+Python 3.10+ is required. Existing dependencies remain unchanged:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+Tests use temporary SQLite databases, controlled clocks and mocked Telegram calls. They cover
+activation, inactive overdue campaigns, persistence/recovery, snapshot eligibility, six-channel
+rechecks, exact message content, preserved legacy records, safe retries, uncertain sends,
+duplicate prevention, CLI previews/activation, future dates, and startup/logging behavior.

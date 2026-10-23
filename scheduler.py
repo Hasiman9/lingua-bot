@@ -2,10 +2,10 @@ import asyncio
 import logging
 import time
 
-from telegram.error import Forbidden, RetryAfter, TelegramError
+from telegram.error import Forbidden, RetryAfter
 
 import config
-from materials import send_materials, validate_materials
+from campaigns import CampaignStore
 from subscriptions import show_failure, verify
 
 logger = logging.getLogger(__name__)
@@ -14,13 +14,9 @@ logger = logging.getLogger(__name__)
 class DeliveryService:
     def __init__(self, db, bot, channels, materials_url, campaign_at,
                  message, clock=time.time):
-        validate_materials(materials_url, message)
         self.db, self.bot, self.channels = db, bot, channels
-        self.materials_url, self.message = materials_url, message
-        if campaign_at.tzinfo is None or campaign_at.utcoffset() is None:
-            raise ValueError("Campaign datetime must be timezone-aware")
         self.campaign_at, self.clock = campaign_at, clock
-        # Serialize confirmation and delivery, including their API calls.
+        self.store = CampaignStore(db.path)
         self.lock = asyncio.Lock()
 
     async def confirm(self, user_id):
@@ -29,70 +25,54 @@ class DeliveryService:
             if not result.passed:
                 await show_failure(self.bot, user_id, result)
                 return
-            row = await self.db.schedule(user_id, self.clock(), self.campaign_at.timestamp())
-            if row["status"] == "delivered":
-                text = "Your materials have already been delivered."
-            else:
-                text = (f"Вижу все подписки, спасибо! 💞\n\n"
-
-"⏰ Ссылку на материалы Бот вышлет 22.10.2026 в 16:00 ⏰\n\n"
-
-"❗️ ВАЖНО ❗️\n "
-"Не отменяйте подписки! Иначе, Бот НЕ вышлет материалы!")
-            await self.bot.send_message(chat_id=user_id, text=text)
+            await self.db.schedule(user_id, self.clock(), self.campaign_at.timestamp())
+            await self.bot.send_message(chat_id=user_id, text=(
+                'Вижу все подписки, спасибо! 💞\n\n'
+                'Не отменяйте подписки! Перед рассылкой бот проверит их снова.'))
 
     async def tick(self, context=None):
         async with self.lock:
-            if self.clock() < self.campaign_at.timestamp():
-                return
-            # Limit each batch so confirmations are not indefinitely starved.
             for _ in range(25):
-                row = await self.db.claim_due(self.clock())
+                row = await asyncio.to_thread(self.store.claim, self.clock())
                 if row is None:
                     break
-                try:
-                    await self.deliver(row)
-                except Forbidden:
-                    await self.db.update(row["user_id"], status="blocked")
-                    logger.info("Delivery blocked for user %s", row["user_id"])
-                except (TelegramError, OSError) as exc:
-                    await self.retry(row, exc)
-                except Exception as exc:
-                    # Log type only: exception messages can contain request URLs/tokens.
-                    logger.error("Delivery error for %s (%s)", row["user_id"], type(exc).__name__)
-                    await self.retry(row, exc)
+                await self.deliver(row)
 
-    async def retry(self, row, error=None, state=None):
-        attempts = row["retry_attempts"] + 1
+    async def update(self, row, **values):
+        await asyncio.to_thread(self.store.update, row, **values)
+
+    async def retry(self, row, error=None):
+        attempts = row['retry_attempts'] + 1
         delay = min(config.RETRY_MAX_SECONDS, config.RETRY_BASE_SECONDS * 2 ** min(attempts - 1, 10))
         if isinstance(error, RetryAfter):
             wait = error.retry_after
-            delay = max(delay, wait.total_seconds() if hasattr(wait, "total_seconds") else wait)
-        values = dict(status="pending", retry_attempts=attempts, next_attempt_at=self.clock() + delay)
-        if state:
-            values["verification_state"] = state
-        await self.db.update(row["user_id"], **values)
-        logger.warning("Delivery retry for user %s in %s seconds", row["user_id"], delay)
+            delay = max(delay, wait.total_seconds() if hasattr(wait, 'total_seconds') else wait)
+        await self.update(row, status='pending', retry_attempts=attempts,
+                          next_attempt_at=self.clock() + delay)
 
     async def deliver(self, row):
-        user_id = row["user_id"]
-        if not self.materials_url:
-            # Keep the original due date, but don't busy-loop or send fake content.
+        try:
+            result = await verify(self.bot, row['user_id'], self.channels)
+        except Exception:
             await self.retry(row)
             return
-        # Recheck ALL channels immediately before the single message, including retries.
-        result = await verify(self.bot, user_id, self.channels)
         if result.errors:
-            await self.retry(row, state="verification_error")
+            await self.retry(row)
             return
         if result.missing:
-            await self.db.update(user_id, status="awaiting_subscription",
-                                 verification_state="subscription_missing")
-            await show_failure(self.bot, user_id, result)
+            await self.update(row, status='subscription_missing')
             return
-        await self.db.update(user_id, second_verified_at=self.clock(),
-                             verification_state="second_passed")
-        await send_materials(self.bot, user_id, self.materials_url, self.message)
-        # Commit acknowledgment and completion together. Legacy file progress is not a link receipt.
-        await self.db.update(user_id, status="delivered", delivered_at=self.clock(), progress=1)
-        logger.info("Materials delivered to user %s", user_id)
+        # Persist before the API call. A crash here is held, never automatically resent.
+        await self.update(row, status='sending', second_verified_at=self.clock())
+        try:
+            await self.bot.send_message(chat_id=row['user_id'], text=row['message'],
+                                        parse_mode=None, disable_web_page_preview=True)
+        except RetryAfter as exc:
+            await self.retry(row, exc)  # Explicit rejection: Telegram did not send.
+        except Forbidden:
+            await self.update(row, status='blocked')
+        except Exception as exc:
+            await self.update(row, status='uncertain')
+            logger.error('Send held for review for user %s (%s)', row['user_id'], type(exc).__name__)
+        else:
+            await self.update(row, status='delivered', delivered_at=self.clock())

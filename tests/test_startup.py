@@ -71,7 +71,6 @@ class StartupSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(reply.call_args.kwargs["reply_markup"].inline_keyboard), 7)
                 self.assertIn("2026-10-22 16:00", reply.call_args.args[0])
                 service = app.bot_data["service"]
-                self.assertEqual(service.message, message)
                 service.clock = lambda: settings.campaign_at.timestamp() - 60
                 await service.confirm(42)
                 self.assertEqual(membership.await_count, 12)
@@ -82,16 +81,11 @@ class StartupSmokeTests(unittest.IsolatedAsyncioTestCase):
                 service.clock = lambda: settings.campaign_at.timestamp()
                 await service.tick()
                 row = await app.bot_data["database"].get(42)
-                if url:
-                    self.assertEqual(membership.await_count, 12)
-                    send.assert_awaited_once()
-                    self.assertEqual(send.call_args.kwargs["text"], message)
-                    self.assertEqual(send.call_args.kwargs["reply_markup"].inline_keyboard[0][0].url, url)
-                    self.assertEqual(row["status"], "delivered")
-                else:
-                    send.assert_not_awaited()
-                    self.assertEqual(row["status"], "pending")
-                    self.assertIsNone(row["delivered_at"])
+                send.assert_not_awaited()
+                membership.assert_not_awaited()
+                self.assertEqual(row["status"], "pending")
+                self.assertIsNone(row["delivered_at"])
+                self.assertEqual(service.store.preview()['campaigns'], [])
             finally:
                 await app.shutdown()
                 await app.post_shutdown(app)
