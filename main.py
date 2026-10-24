@@ -91,7 +91,7 @@ async def on_startup(application):
     application.job_queue.run_repeating(service.tick, interval=config.POLL_SECONDS, first=1,
                                         job_kwargs={"max_instances": 1, "coalesce": True})
     logger.info("Persistent delivery scheduler registered; starts with Telegram Application")
-    logger.info("Only explicitly activated SQLite campaigns can deliver materials")
+    logger.info("Materials require an explicitly activated campaign or temporary reward window")
     logger.info("Post-initialization complete; starting Telegram polling (webhook removal/getUpdates bootstrap)")
 
 

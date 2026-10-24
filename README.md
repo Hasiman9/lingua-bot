@@ -1,8 +1,73 @@
 # Lingua materials bot
 
 The existing polling bot verifies all five channels on confirmation. Materials are now
-sent only by an **explicitly activated, one-time SQLite campaign**. Deploying, editing
+sent only by an **explicitly activated campaign or temporary reward window**. Deploying, editing
 configuration, starting the bot, and previewing do not activate delivery.
+
+## Temporary 72-hour reward for new subscribers
+
+This optional feature has its own `reward_window` and `reward_deliveries` SQLite tables.
+It does not create a broadcast, change `materials-immediate-v1`, alter its recipient snapshot,
+or enroll any existing verified users. Existing campaign processing continues normally.
+
+**New** means the user's first successful five-channel verification is recorded during the
+window, not their first `/start`. Someone who used `/start` previously but never passed
+verification can qualify. Anyone with an existing `deliveries` record cannot newly enroll.
+The first verification record and reward enrollment commit atomically. Existing subscriber
+records are left intact, even when users click `ГОТОВО` repeatedly.
+
+Activation stores UTC Unix `activated_at` and `expires_at = activated_at + 259200` (72 hours).
+The window is inclusive at activation and exclusive at expiry. Repeated activation is refused,
+including after expiry: neither a restart nor another command can extend the deadline.
+No background cron task or startup-script change is needed.
+
+After successful verification, an enrolled user automatically receives the exact materials
+message shown below, with no further `/start` or button click. A short pacing wait and fresh
+five-channel check precede sending. Telegram/API errors retry automatically while the window
+remains active, using the existing persistent rate-limit cooldown. After expiry, queued/retrying
+rewards are withheld and verification continues normally. The deadline is checked again when
+reserving a send and immediately before the API call. A request already in flight before the
+deadline may be acknowledged by Telegram after it; it cannot be recalled atomically.
+
+Both delivery paths use the same SQLite-transaction send guard. A delivered or uncertain
+campaign/reward receipt prevents another materials send through either path. Concurrent
+callbacks/claims cannot reserve the same user twice. Interrupted pre-send work can recover;
+interrupted/ambiguous sends stay `uncertain` and are never automatically retried. This avoids
+duplicates at the cost of potentially withholding a send whose outcome cannot be established.
+
+### Deploy this feature without activating another campaign
+
+After publishing these changes to GitHub, in a PythonAnywhere Bash console:
+
+```bash
+cd ~/lingua-bot
+git pull --ff-only origin main
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python reward.py preview
+.venv/bin/python diagnose_channels.py
+```
+
+Use the same virtualenv and environment as the existing Always-on task. Take the consistent
+SQLite backup described below before upgrading. Manually restart the existing task once to load
+the updated code and initialize the new tables. Keep its existing startup command/script.
+Previously activated campaigns continue processing; this does not activate the reward.
+
+Check the preview's database path and require diagnostic output `administrator_ok=5 failed=0`.
+When the updated bot is running and you explicitly want to begin the 72 hours:
+
+```bash
+cd ~/lingua-bot
+.venv/bin/python reward.py preview
+.venv/bin/python reward.py activate --confirm
+.venv/bin/python reward.py status
+```
+
+`preview` and `status` are read-only aliases: they show `inactive`, `active`, or `expired`, the
+UTC activation/expiry times, time remaining and reward counts by status. Expiry is computed from
+the persisted deadline even if the bot is stopped. Pending rows are marked expired on the next
+scheduler scan; a read-only status command does not rewrite their history. All three CLI commands
+are offline and never call Telegram or send messages. Activation inserts only the window, no
+recipient snapshot. **Use `reward.py`, not `campaign.py activate`, for this feature.**
 
 ## One-time delivery policy
 

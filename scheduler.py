@@ -6,6 +6,7 @@ from telegram.error import Forbidden, RetryAfter
 
 import config
 from campaigns import CampaignStore
+from rewards import RewardStore
 from subscriptions import show_failure, verify
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ class DeliveryService:
         self.db, self.bot, self.channels = db, bot, channels
         self.campaign_at, self.clock = campaign_at, clock
         self.store = CampaignStore(db.path)
+        self.rewards = RewardStore(db.path)
         self.lock = asyncio.Lock()
         self.sleep = sleep
 
@@ -26,15 +28,22 @@ class DeliveryService:
             if not result.passed:
                 await show_failure(self.bot, user_id, result)
                 return
-            await self.db.schedule(user_id, self.clock(), self.campaign_at.timestamp())
+            await asyncio.to_thread(self.rewards.register_verified, user_id, self.clock(), self.campaign_at.timestamp())
             await self.bot.send_message(chat_id=user_id, text=(
                 'Вижу все подписки, спасибо! 💞\n\n'
                 'Не отменяйте подписки! Перед рассылкой бот проверит их снова.'))
+            # No extra click is needed; safe retries/restarts are handled by tick().
+            row = await asyncio.to_thread(self.rewards.claim, self.clock(), user_id)
+            if row:
+                await self.sleep(config.DELIVERY_INTERVAL_SECONDS)
+                await self.deliver(row)
 
     async def tick(self, context=None):
         async with self.lock:
             for _ in range(25):
-                row = await asyncio.to_thread(self.store.claim, self.clock())
+                row = await asyncio.to_thread(self.rewards.claim, self.clock())
+                if row is None:
+                    row = await asyncio.to_thread(self.store.claim, self.clock())
                 if row is None:
                     break
                 # Conservative pacing: at most one recipient per second, even after restart.
@@ -43,7 +52,8 @@ class DeliveryService:
                 await self.deliver(row)
 
     async def update(self, row, **values):
-        await asyncio.to_thread(self.store.update, row, **values)
+        store = self.rewards if row.get('reward') else self.store
+        await asyncio.to_thread(store.update, row, **values)
 
     async def retry(self, row, error=None, retry_after=0):
         attempts = row['retry_attempts'] + 1
@@ -70,7 +80,12 @@ class DeliveryService:
             await self.update(row, status='subscription_missing')
             return
         # Persist before the API call. A crash here is held, never automatically resent.
-        await self.update(row, status='sending', second_verified_at=self.clock())
+        store = self.rewards if row.get('reward') else self.store
+        if not await asyncio.to_thread(store.begin_send, row, clock=self.clock):
+            return
+        if row.get('reward') and self.clock() >= row['expires_at']:
+            await self.update(row, status='expired')
+            return
         try:
             await self.bot.send_message(chat_id=row['user_id'], text=row['message'],
                                         parse_mode=None, disable_web_page_preview=True)

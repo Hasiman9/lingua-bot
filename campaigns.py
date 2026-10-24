@@ -20,6 +20,26 @@ ELIGIBLE = """
 """
 
 
+def has_materials_receipt(db, user_id):
+    """Used inside BEGIN IMMEDIATE, before reserving either type of send."""
+    return db.execute("""SELECT 1 FROM deliveries WHERE user_id=?
+        AND (status IN ('delivered','processing','sending','uncertain') OR delivered_at IS NOT NULL)
+        UNION ALL SELECT 1 FROM campaign_recipients WHERE user_id=?
+        AND (status IN ('delivered','sending','uncertain') OR delivered_at IS NOT NULL)
+        UNION ALL SELECT 1 FROM reward_deliveries WHERE user_id=?
+        AND (status IN ('delivered','sending','uncertain') OR delivered_at IS NOT NULL)
+        LIMIT 1""", (user_id, user_id, user_id)).fetchone() is not None
+
+
+def eligibility_query(db):
+    # Preview must also work read-only against pre-upgrade databases.
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='reward_deliveries'").fetchone():
+        return ELIGIBLE + """ AND NOT EXISTS (SELECT 1 FROM reward_deliveries r
+            WHERE r.user_id=d.user_id AND (r.status IN ('delivered','sending','uncertain')
+            OR r.delivered_at IS NOT NULL))"""
+    return ELIGIBLE
+
+
 class CampaignStore:
     def __init__(self, path):
         self.path = path
@@ -49,6 +69,16 @@ class CampaignStore:
                     id INTEGER PRIMARY KEY CHECK (id=1), not_before REAL NOT NULL
                 );
                 INSERT OR IGNORE INTO delivery_control VALUES (1, 0);
+                CREATE TABLE IF NOT EXISTS reward_window (
+                    id INTEGER PRIMARY KEY CHECK (id=1), activated_at REAL NOT NULL,
+                    expires_at REAL NOT NULL, message TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS reward_deliveries (
+                    user_id INTEGER PRIMARY KEY, enrolled_at REAL NOT NULL,
+                    status TEXT NOT NULL, next_attempt_at REAL NOT NULL,
+                    retry_attempts INTEGER NOT NULL DEFAULT 0,
+                    second_verified_at REAL, delivered_at REAL
+                );
             """)
             columns = {r['name'] for r in db.execute('PRAGMA table_info(campaigns)')}
             if 'requirements_version' not in columns:
@@ -58,6 +88,8 @@ class CampaignStore:
             # Only the bot calls this, while holding the existing process lock.
             db.execute("UPDATE campaign_recipients SET status='pending' WHERE status='processing'")
             db.execute("UPDATE campaign_recipients SET status='uncertain' WHERE status='sending'")
+            db.execute("UPDATE reward_deliveries SET status='pending' WHERE status='processing'")
+            db.execute("UPDATE reward_deliveries SET status='uncertain' WHERE status='sending'")
 
     def activate(self, campaign_id, at=None, clock=time.time, replace_active=False):
         with closing(self.connect()) as db, db:
@@ -80,13 +112,15 @@ class CampaignStore:
                        VALUES (?, ?, ?, 'active', NULL, ?, ?)""",
                        (campaign_id, now, due, MESSAGE, REQUIREMENTS_VERSION))
             db.execute("INSERT INTO campaign_recipients (campaign_id,user_id,status,next_attempt_at) "
-                       "SELECT ?, user_id, 'pending', ? FROM (" + ELIGIBLE + ')', (campaign_id, due))
+                       "SELECT ?, user_id, 'pending', ? FROM (" + eligibility_query(db) + ')', (campaign_id, due))
             return due
 
     def preview(self):
         with closing(self.connect(readonly=True)) as db:
             db.execute('BEGIN')
             delivered = "SELECT user_id FROM deliveries WHERE status='delivered' OR delivered_at IS NOT NULL"
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='reward_deliveries'").fetchone():
+                delivered += " UNION SELECT user_id FROM reward_deliveries WHERE status='delivered' OR delivered_at IS NOT NULL"
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='campaigns'").fetchone():
                 count = db.execute("SELECT count(*) FROM deliveries WHERE first_verified_at IS NOT NULL "
                                    "AND status NOT IN ('delivered','processing','sending','uncertain') "
@@ -99,7 +133,7 @@ class CampaignStore:
                 item['requires_explicit_replacement'] = (
                     item['status'] == 'active' and item.get('requirements_version') != REQUIREMENTS_VERSION)
             return dict(
-                eligible=db.execute('SELECT count(*) FROM (' + ELIGIBLE + ')').fetchone()[0],
+                eligible=db.execute('SELECT count(*) FROM (' + eligibility_query(db) + ')').fetchone()[0],
                 previously_delivered=db.execute('SELECT count(*) FROM (' + delivered +
                     " UNION SELECT user_id FROM campaign_recipients WHERE status='delivered' OR delivered_at IS NOT NULL)").fetchone()[0],
                 uncertain_users=db.execute("SELECT count(DISTINCT user_id) FROM campaign_recipients WHERE status IN ('uncertain','sending')").fetchone()[0],
@@ -131,6 +165,20 @@ class CampaignStore:
         """Persist Telegram's global delivery cooldown across restarts and campaigns."""
         with closing(self.connect()) as db, db:
             db.execute('UPDATE delivery_control SET not_before=max(not_before, ?) WHERE id=1', (until,))
+
+    def begin_send(self, row, now=None, clock=time.time):
+        """Atomically reserve a send against both campaign and reward receipts."""
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            now = clock() if now is None else now
+            current = db.execute('SELECT status FROM campaign_recipients WHERE campaign_id=? AND user_id=?',
+                                 (row['campaign_id'], row['user_id'])).fetchone()
+            if not current or current['status'] != 'processing':
+                return False
+            duplicate = has_materials_receipt(db, row['user_id'])
+            db.execute('UPDATE campaign_recipients SET status=?,second_verified_at=? WHERE campaign_id=? AND user_id=?',
+                       ('duplicate_skipped' if duplicate else 'sending', now, row['campaign_id'], row['user_id']))
+            return not duplicate
 
     def update(self, row, **values):
         allowed = {'status', 'next_attempt_at', 'retry_attempts', 'second_verified_at', 'delivered_at'}
