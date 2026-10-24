@@ -1,6 +1,7 @@
 """Offline verification and explicit campaign workflow tests."""
 import asyncio
 import io
+from contextlib import closing
 import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
@@ -28,15 +29,16 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.store = CampaignStore(self.path)
         self.store.initialize()
         self.now = 1000
-        self.statuses = ['member'] * 6
+        self.statuses = ['member'] * 5
         self.admin = True
         self.failed_channel = None
         self.channels = tuple(config.Channel(f'@channel{i}', f'Channel {i}', f'https://t.me/channel{i}')
-                              for i in range(6))
+                              for i in range(5))
         self.bot = SimpleNamespace(id=999, get_chat_member=AsyncMock(side_effect=self.membership),
                                    send_message=AsyncMock())
         self.service = DeliveryService(self.db, self.bot, self.channels, '',
-                                       datetime.fromtimestamp(100, timezone.utc), '', clock=lambda: self.now)
+                                       datetime.fromtimestamp(100, timezone.utc), '', clock=lambda: self.now,
+                                       sleep=AsyncMock())
 
     async def asyncTearDown(self):
         await self.db.close()
@@ -82,11 +84,11 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.preview()['campaigns'], [])
         self.assertEqual(before, await self.db.get(42))
 
-    async def test_activation_plus_five_minutes_and_exact_single_message(self):
+    async def test_immediate_activation_and_exact_single_message(self):
         await self.register()
         self.now += 8000  # Delay between deployment/registration and activation.
         due = self.activate()
-        self.assertEqual(due, self.now + 300)
+        self.assertEqual(due, self.now)
         self.now = due - 1
         await self.service.tick()
         self.bot.send_message.assert_not_awaited()
@@ -96,13 +98,13 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             chat_id=42, text='🎁✨Спасибо за доверие, вот ваши материалы-подарочки:\n\n'
             'https://drive.google.com/drive/folders/1lvzrprek8YgQt42iv7BWS9eSveJUFm-W?usp=sharing',
             parse_mode=None, disable_web_page_preview=True)
-        self.assertEqual(self.bot.get_chat_member.await_count, 12)
+        self.assertEqual(self.bot.get_chat_member.await_count, 10)
         self.assertEqual(self.recipient()['status'], 'delivered')
         self.assertEqual(self.store.preview()['campaigns'][0]['status'], 'completed')
 
-    async def test_restart_preserves_countdown_and_activated_overdue_work(self):
+    async def test_restart_preserves_explicit_future_date_and_overdue_work(self):
         await self.register()
-        due = self.activate()
+        due = self.activate(at=self.now + 3600)
         await self.db.close()
         await self.db.open(999999)
         self.store.initialize()
@@ -132,7 +134,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.statuses[-1] = 'left'
         await self.service.tick()
         self.bot.send_message.assert_not_awaited()
-        self.assertEqual(self.bot.get_chat_member.await_count, 12)
+        self.assertEqual(self.bot.get_chat_member.await_count, 10)
         self.assertEqual(self.recipient()['status'], 'subscription_missing')
         self.statuses[-1] = 'member'
         await self.register()
@@ -155,7 +157,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.bot.get_chat_member.reset_mock()
         self.now = row['next_attempt_at']
         await self.service.tick()
-        self.assertEqual(self.bot.get_chat_member.await_count, 12)
+        self.assertEqual(self.bot.get_chat_member.await_count, 10)
         self.bot.send_message.assert_awaited_once()
 
     async def test_no_admin_rights_prevents_delivery(self):
@@ -274,16 +276,16 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(SystemExit):
                 campaign.main(['activate'])
             self.assertEqual(self.store.preview()['campaigns'], [])
-            campaign.main(['activate', '--confirm'])
+            campaign.main(['activate', '--immediate', '--replace-active', '--confirm'])
             saved = self.store.preview()['campaigns'][0]
-            self.assertEqual(saved['scheduled_at'] - saved['activated_at'], 300)
+            self.assertEqual(saved['scheduled_at'], saved['activated_at'])
             with self.assertRaises(SystemExit):
                 campaign.main(['activate', '--confirm'])
             self.assertEqual(saved, self.store.preview()['campaigns'][0])
         self.bot.send_message.assert_not_awaited()
 
     async def test_all_membership_statuses_and_initial_failure(self):
-        self.statuses = ['member', 'administrator', 'creator', 'owner', 'restricted', 'member']
+        self.statuses = ['member', 'administrator', 'creator', 'owner', 'restricted']
         self.assertTrue((await verify(self.bot, 42, self.channels)).passed)
         self.failed_channel = 2
         await self.register()
@@ -291,7 +293,111 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         for status in ('left', 'kicked', 'unknown'):
             self.assertFalse(is_member(SimpleNamespace(status=status)))
         self.assertFalse(is_member(SimpleNamespace(status='restricted', is_member=False)))
-        self.assertEqual(len(keyboard(self.channels).inline_keyboard), 7)
+        self.assertEqual(len(keyboard(self.channels).inline_keyboard), 6)
+
+    async def test_59_legacy_users_require_explicit_replacement_then_current_five_checks(self):
+        # Simulate the actual pre-upgrade schema in a temporary DB, not production.
+        for uid in range(1, 60):
+            await self.db.schedule(uid, 10, 20)
+        original_users = [await self.db.get(uid) for uid in range(1, 60)]
+        with closing(self.store.connect()) as db, db:
+            db.execute('DROP TABLE campaigns')
+            db.execute('CREATE TABLE campaigns (id TEXT PRIMARY KEY, activated_at REAL NOT NULL, '
+                       'scheduled_at REAL NOT NULL, status TEXT NOT NULL, completed_at REAL, message TEXT NOT NULL)')
+            db.execute("INSERT INTO campaigns VALUES ('old', 10, 20, 'active', NULL, ?)", (MESSAGE,))
+            db.execute("INSERT INTO campaigns VALUES ('finished', 1, 2, 'completed', 3, ?)", (MESSAGE,))
+            db.executemany("INSERT INTO campaign_recipients (campaign_id,user_id,status,next_attempt_at) "
+                           "VALUES ('old', ?, 'pending', 20)", [(uid,) for uid in range(1, 60)])
+        self.assertEqual(self.store.preview()['eligible'], 59)
+        self.store.initialize()
+        await self.service.tick()
+        self.bot.send_message.assert_not_awaited()
+        preview = self.store.preview()
+        self.assertTrue(next(c for c in preview['campaigns'] if c['id'] == 'old')['requires_explicit_replacement'])
+        with self.assertRaises(ValueError):
+            self.activate()
+        due = self.store.activate('one', clock=lambda: self.now, replace_active=True)
+        self.assertEqual(due, self.now)
+        self.assertEqual(self.store.preview()['deliveries'], [
+            {'campaign_id': 'old', 'status': 'pending', 'count': 59},
+            {'campaign_id': 'one', 'status': 'pending', 'count': 59},
+        ])
+        self.service.channels = config.CHANNELS
+        self.bot.get_chat_member.side_effect = None
+        self.bot.get_chat_member.return_value = SimpleNamespace(status='administrator')
+        for _ in range(3):
+            await self.service.tick()
+        self.assertEqual(self.bot.send_message.await_count, 59)
+        self.assertEqual(len({c.kwargs['chat_id'] for c in self.bot.send_message.call_args_list}), 59)
+        self.assertEqual(self.bot.get_chat_member.await_count, 59 * 10)
+        self.assertEqual({c.kwargs['chat_id'] for c in self.bot.get_chat_member.call_args_list},
+                         {c.chat_id for c in config.CHANNELS})
+        self.assertEqual(self.service.sleep.await_count, 59)
+        self.assertTrue(all(c.args == (1.0,) for c in self.service.sleep.call_args_list))
+        self.assertEqual(original_users, [await self.db.get(uid) for uid in range(1, 60)])
+        self.assertEqual(self.store.preview()['previously_delivered'], 59)
+        self.assertEqual(self.store.preview()['eligible'], 0)
+        with closing(self.store.connect(readonly=True)) as db:
+            self.assertEqual(tuple(db.execute("SELECT status,scheduled_at FROM campaigns WHERE id='old'").fetchone()),
+                             ('superseded', 20))
+            self.assertEqual(tuple(db.execute("SELECT status,completed_at FROM campaigns WHERE id='finished'").fetchone()),
+                             ('completed', 3))
+            self.assertEqual(db.execute("SELECT count(*) FROM campaign_recipients WHERE campaign_id='old' AND status='pending'").fetchone()[0], 59)
+
+    async def test_replacement_is_atomic_and_refuses_inflight_sends(self):
+        await self.due()
+        before = self.store.preview()
+        with self.assertRaises(ValueError):
+            self.store.activate('two', at=1, replace_active=True, clock=lambda: self.now)
+        self.assertEqual(before, self.store.preview())
+        row = self.store.claim(self.now)
+        for status in ('processing', 'sending'):
+            self.store.update(row, status=status)
+            with self.assertRaises(ValueError):
+                self.store.activate('two', replace_active=True, clock=lambda: self.now)
+        self.store.initialize()  # Restart: interrupted sending is uncertain, never resent.
+        self.store.activate('two', replace_active=True, clock=lambda: self.now)
+        self.assertIsNone(self.recipient(name='two'))
+        self.assertEqual(self.recipient()['status'], 'uncertain')
+
+    async def test_preview_counts_delivered_users_without_double_counting(self):
+        await self.due()
+        await self.service.tick()
+        await self.db.update(42, status='delivered', delivered_at=self.now)
+        await self.db.schedule(43, 10, 20)
+        await self.db.update(43, status='delivered', delivered_at=30)
+        result = self.store.preview()
+        self.assertEqual(result['previously_delivered'], 2)
+        self.assertEqual(result['eligible'], 0)
+
+    async def test_global_send_rate_limit_survives_restart_and_holds_other_users(self):
+        await self.register(42)
+        await self.register(43)
+        self.activate()
+        self.bot.send_message.side_effect = RetryAfter(120)
+        await self.service.tick()
+        self.bot.send_message.assert_awaited_once()
+        self.store.initialize()
+        self.bot.send_message.side_effect = None
+        self.bot.send_message.reset_mock()
+        self.bot.get_chat_member.reset_mock()
+        self.now += 119
+        await self.service.tick()
+        self.bot.get_chat_member.assert_not_awaited()
+        self.bot.send_message.assert_not_awaited()
+        self.now += 1
+        await self.service.tick()
+        self.assertEqual(self.bot.get_chat_member.await_count, 20)
+        self.assertEqual(self.bot.send_message.await_count, 2)
+
+    async def test_membership_rate_limit_withholds_and_stops_further_requests(self):
+        await self.due()
+        self.bot.get_chat_member.side_effect = RetryAfter(120)
+        await self.service.tick()
+        self.bot.get_chat_member.assert_awaited_once()
+        self.bot.send_message.assert_not_awaited()
+        self.assertEqual(self.recipient()['status'], 'pending')
+        self.assertEqual(self.recipient()['next_attempt_at'], self.now + 120)
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -309,7 +415,9 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(argparse.ArgumentTypeError):
                 campaign.utc_time(text)
 
-    def test_six_distinct_channels_required(self):
+    def test_five_distinct_channels_required(self):
         config.validate_channels(config.CHANNELS)
         with self.assertRaises(ValueError):
-            config.validate_channels(config.CHANNELS[:5])
+            config.validate_channels(config.CHANNELS[:4])
+        self.assertEqual([c.chat_id for c in config.CHANNELS], [
+            '@linguamaterials', '@nymomenglish', '@sofikenglish', '@miss_di_english', '@shek_english'])

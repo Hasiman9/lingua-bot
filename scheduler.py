@@ -13,11 +13,12 @@ logger = logging.getLogger(__name__)
 
 class DeliveryService:
     def __init__(self, db, bot, channels, materials_url, campaign_at,
-                 message, clock=time.time):
+                 message, clock=time.time, sleep=asyncio.sleep):
         self.db, self.bot, self.channels = db, bot, channels
         self.campaign_at, self.clock = campaign_at, clock
         self.store = CampaignStore(db.path)
         self.lock = asyncio.Lock()
+        self.sleep = sleep
 
     async def confirm(self, user_id):
         async with self.lock:
@@ -36,17 +37,23 @@ class DeliveryService:
                 row = await asyncio.to_thread(self.store.claim, self.clock())
                 if row is None:
                     break
+                # Conservative pacing: at most one recipient per second, even after restart.
+                # Wait BEFORE checking membership so checks remain immediately before send.
+                await self.sleep(config.DELIVERY_INTERVAL_SECONDS)
                 await self.deliver(row)
 
     async def update(self, row, **values):
         await asyncio.to_thread(self.store.update, row, **values)
 
-    async def retry(self, row, error=None):
+    async def retry(self, row, error=None, retry_after=0):
         attempts = row['retry_attempts'] + 1
         delay = min(config.RETRY_MAX_SECONDS, config.RETRY_BASE_SECONDS * 2 ** min(attempts - 1, 10))
         if isinstance(error, RetryAfter):
             wait = error.retry_after
-            delay = max(delay, wait.total_seconds() if hasattr(wait, 'total_seconds') else wait)
+            retry_after = max(retry_after, wait.total_seconds() if hasattr(wait, 'total_seconds') else wait)
+        if retry_after:
+            delay = max(delay, retry_after)
+            await asyncio.to_thread(self.store.defer, self.clock() + retry_after)
         await self.update(row, status='pending', retry_attempts=attempts,
                           next_attempt_at=self.clock() + delay)
 
@@ -57,7 +64,7 @@ class DeliveryService:
             await self.retry(row)
             return
         if result.errors:
-            await self.retry(row)
+            await self.retry(row, retry_after=result.retry_after)
             return
         if result.missing:
             await self.update(row, status='subscription_missing')

@@ -46,6 +46,7 @@ class MembershipCheck:
     reason: str
     member: object = None
     exception_type: str | None = None
+    retry_after: float = 0
 
 
 async def check_membership(bot, channel, user_id, role):
@@ -61,7 +62,9 @@ async def check_membership(bot, channel, user_id, role):
             channel.chat_id, role, category, type(exc).__name__, reason,
             int((time.monotonic() - started) * 1000),
         )
-        return MembershipCheck(None, category, reason, exception_type=type(exc).__name__)
+        wait = exc.retry_after if isinstance(exc, RetryAfter) else 0
+        wait = wait.total_seconds() if hasattr(wait, 'total_seconds') else wait
+        return MembershipCheck(None, category, reason, exception_type=type(exc).__name__, retry_after=wait)
     if role == "bot":
         category = "ok" if member.status in ADMIN_STATUSES else "insufficient_admin"
         reason = "Bot is an administrator" if category == "ok" else "Bot is not an administrator in this channel"
@@ -79,6 +82,7 @@ async def check_membership(bot, channel, user_id, role):
 class Verification:
     missing: list = field(default_factory=list)
     errors: list = field(default_factory=list)
+    retry_after: float = 0
 
     @property
     def passed(self):
@@ -92,21 +96,28 @@ def is_member(member):
 
 
 async def verify(bot, user_id, channels):
-    if len(channels) != 6:
-        raise ValueError("Verification requires all six channels")
+    config.validate_channels(channels)
     result = Verification()
     for channel in channels:
         own = await check_membership(bot, channel, bot.id, "bot")
+        result.retry_after = max(result.retry_after, own.retry_after)
         if own.member is None:
             result.errors.append(channel)
             logger.info("verification channel_id=%s subscriber_check=skipped reason=bot_access_failed", channel.chat_id)
+            if own.retry_after:
+                logger.warning('verification remaining_checks=withheld reason=rate_limited')
+                break
             continue
         member = await check_membership(bot, channel, user_id, "subscriber")
+        result.retry_after = max(result.retry_after, member.retry_after)
         # A non-admin bot's user lookup is not trustworthy, even if it returned a status.
         if own.category != "ok" or member.member is None:
             result.errors.append(channel)
         elif member.category == "missing_subscription":
             result.missing.append(channel)
+        if member.retry_after:
+            logger.warning('verification remaining_checks=withheld reason=rate_limited')
+            break
     logger.info("verification summary checked_channels=%d missing=%d errors=%d passed=%s",
                 len(channels), len(result.missing), len(result.errors), result.passed)
     return result

@@ -68,12 +68,12 @@ class StartupSmokeTests(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(effective_message=SimpleNamespace(reply_text=reply)),
                     SimpleNamespace(application=app),
                 )
-                self.assertEqual(len(reply.call_args.kwargs["reply_markup"].inline_keyboard), 7)
+                self.assertEqual(len(reply.call_args.kwargs["reply_markup"].inline_keyboard), 6)
                 self.assertIn("2026-10-22 16:00", reply.call_args.args[0])
                 service = app.bot_data["service"]
                 service.clock = lambda: settings.campaign_at.timestamp() - 60
                 await service.confirm(42)
-                self.assertEqual(membership.await_count, 12)
+                self.assertEqual(membership.await_count, 10)
                 send.reset_mock()
                 membership.reset_mock()
                 await service.tick()

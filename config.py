@@ -24,7 +24,6 @@ CHANNELS = (
     Channel("@nymomenglish", "Not Your Mom’s English", "https://t.me/+N-pMyx7PSac5NDYy"),
     Channel("@sofikenglish", "Sofik.english", "https://t.me/+ADz8Fn388e1jNjlk"),
     Channel("@miss_di_english", "Di English", "https://t.me/+hasak6SslgI2NDAy"),
-    Channel("@abcgames_eng", "English Games by @abcgames_eng", "https://t.me/+gtE3hF8QEithYzAy"),
     Channel("@shek_english", "Шекспирыч 🇬🇧🇨🇳language school", "https://t.me/+-uqXj5TiTeQ4OWJi"),
 )
 # Private channel example: Channel(-1001234567890, "Private channel", "https://t.me/+REAL_INVITE")
@@ -46,6 +45,7 @@ API_ERROR_TEXT = "Telegram could not verify every channel. Please try again late
 POLL_SECONDS = 30
 RETRY_BASE_SECONDS = 60
 RETRY_MAX_SECONDS = 3600
+DELIVERY_INTERVAL_SECONDS = 1.0
 
 # Editable plain text. The sender adds a button using MATERIALS_URL loaded from .env.
 MATERIALS_MESSAGE = (
@@ -112,11 +112,11 @@ def load_settings() -> Settings:
 
 
 def validate_channels(channels):
-    if len(channels) != 6 or len({c.chat_id for c in channels}) != 6:
-        raise ValueError("Configure exactly six distinct channels")
+    if len(channels) != 5 or len({c.chat_id for c in channels}) != 5:
+        raise ValueError("Configure exactly five distinct channels")
     for channel in channels:
         if "REPLACE" in str(channel.chat_id) or "REPLACE" in channel.url:
-            raise ValueError("Replace Channels 2–6 in config.py before starting")
+            raise ValueError("Replace placeholder channels in config.py before starting")
         if not channel.name or not channel.url.startswith("https://t.me/"):
             raise ValueError("Each channel requires a name and Telegram join URL")
         if not (isinstance(channel.chat_id, int) and channel.chat_id < 0) and not (

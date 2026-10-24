@@ -1,20 +1,23 @@
 # Lingua materials bot
 
-The existing polling bot verifies all six channels on confirmation. Materials are now
+The existing polling bot verifies all five channels on confirmation. Materials are now
 sent only by an **explicitly activated, one-time SQLite campaign**. Deploying, editing
 configuration, starting the bot, and previewing do not activate delivery.
 
 ## One-time delivery policy
 
-- `campaign.py activate --confirm` stores the activation time and activation + **300 seconds**
-  as UTC Unix timestamps in the existing SQLite database.
+- `campaign.py activate --immediate --replace-active --confirm` stores the activation time
+  as the **immediate due time**, using UTC Unix seconds in the existing SQLite database.
+  No five-minute delay or old October 22 date controls this delivery.
+- The required channels are `@linguamaterials`, `@nymomenglish`, `@sofikenglish`,
+  `@miss_di_english`, and `@shek_english`. The removed channel has no button or membership check.
 - Activation atomically snapshots previously verified users from `deliveries`.
   Users who first verify after activation are not added to that campaign.
 - Existing subscribers, subscription records, legacy dates and delivery history stay intact.
   New `campaigns` and `campaign_recipients` tables hold campaign state and history.
 - Legacy completed deliveries and any user with a new delivered receipt are excluded.
   Legacy `processing` records are conservatively excluded because their send outcome is unknown.
-- Immediately before every send (including safe retries), all six channels are checked again.
+- Immediately before every send (including safe retries), all five current channels are checked again.
   The bot must be an administrator in each channel. Missing membership skips that user for
   this campaign; confirming again does not reopen it. Verification API errors retry with backoff.
 - The exact text below is persisted with the campaign and sent in **one plain-text message**,
@@ -28,13 +31,22 @@ https://drive.google.com/drive/folders/1lvzrprek8YgQt42iv7BWS9eSveJUFm-W?usp=sha
 
 - Scheduler scans occur every 30 seconds, in batches of 25. Delivery starts on the first
   scan at/after the stored time; checks, recipient count and Telegram limits can delay receipt.
-- Restarts retain the countdown and retry backoff. An explicitly activated campaign resumes
-  after downtime, even if its deadline passed. Old campaigns are never automatically activated.
+- Recipients are paced at no more than one per second; checks occur after the pacing wait.
+  Telegram `RetryAfter` responses pause campaign delivery globally, including other recipients.
+  The cooldown and per-user retry state persist across restarts. Every safe retry rechecks membership.
+- Restarts retain the due time and retry backoff. A newly explicitly activated campaign resumes
+  after downtime, even if its deadline passed. Pre-upgrade campaigns remain held for explicit
+  replacement: they have no `five-channel-v1` policy marker and cannot send on deployment.
 - Campaigns finish once there are no pending/in-flight recipients. Missing subscriptions,
   blocked users and uncertain sends are terminal for that campaign. Verification outages and
   explicit rate limits keep it active until safe retries finish.
-- Reusing a campaign ID fails without changing anything. A second campaign cannot be activated
-  while one is active. Completed campaigns and their timestamps are never changed.
+- Reusing a campaign ID fails without changing anything. `--replace-active` explicitly marks
+  any unfinished campaign as `superseded`, preserving all its recipient records and timestamps,
+  and snapshots currently eligible users into a fresh campaign. An in-flight delivery blocks
+  replacement; wait until it finishes. Completed campaigns and their timestamps are never changed.
+- Existing verified users (including the previously reported 59) need not press `ГОТОВО` again.
+  Actual recipient counts come from the production database, excluding delivered/uncertain users.
+  Campaigns store recipient snapshots, not old channel lists: the final check uses current config.
 
 ### Duplicate prevention
 
@@ -90,11 +102,15 @@ git status --short --branch
 git pull --ff-only origin main
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python campaign.py preview
+.venv/bin/python diagnose_channels.py
 ```
 
-Review the changed files and test output. Before first startup the preview can read the legacy
-database without migrating it; it should show no activated campaigns and zero pending campaign
-deliveries. `eligible` means recorded initial verification, **not** live membership verification.
+Review the changed files and test output. Preview can read the legacy database without migrating
+it. Old active campaigns display `requires_explicit_replacement: true` and remain held after
+startup. `eligible` means recorded initial verification, **not** live membership verification.
+`previously_delivered` counts distinct users across legacy records and campaign receipts;
+`uncertain_users` identifies held campaign outcomes. Recipient counts by campaign/status preserve
+the old history, so superseded pending rows are historical and are not runnable deliveries.
 If Git reports local changes or refuses the fast-forward, resolve that separately before
 continuing; do not use `git reset --hard` or `git clean` on the production checkout.
 
@@ -109,9 +125,12 @@ Then run:
 ```bash
 cd ~/lingua-bot
 .venv/bin/python campaign.py preview
+.venv/bin/python diagnose_channels.py
 ```
 
-Startup adds campaign tables but does not schedule anything. Preview opens SQLite read-only;
+Require diagnostic output `administrator_ok=5 failed=0` before activation. Use the exact bot
+token/environment used by the existing task. Startup adds compatible schema fields but does not
+activate or authorize old campaigns. Preview opens SQLite read-only;
 it reports UTC scheduled times, eligible counts, and counts by recipient status including pending.
 Neither operator command connects to Telegram. Activation can run while the bot is running;
 SQLite transactions serialize activation and scheduler work.
@@ -120,13 +139,16 @@ SQLite transactions serialize activation and scheduler work.
 
 ```bash
 cd ~/lingua-bot
-.venv/bin/python campaign.py activate --confirm
+.venv/bin/python campaign.py activate --immediate --replace-active --confirm
 .venv/bin/python campaign.py preview
 ```
 
-**The five-minute countdown begins at successful activation**, not deployment or restart.
-The default campaign ID is `materials-five-minute-v1`. Repeating the command fails safely and
-does not reset the countdown or reopen completed deliveries. No restart is required after activation.
+**Delivery becomes due at successful activation**, without any five-minute wait.
+The default campaign ID is `materials-immediate-v1`. Repeating the command fails safely and
+does not reset or reopen completed deliveries. No restart is required after activation.
+The next scheduler scan (normally within 30 seconds), pacing and final checks determine actual
+receipt times. `--replace-active` is safe when no unfinished campaign exists and allows a held
+old overdue campaign to be explicitly replaced without losing its history.
 
 ### Future delivery date
 
@@ -146,7 +168,7 @@ separate change; changing the campaign ID alone does not resend these materials.
 
 - Keep the existing `BOT_TOKEN` and `DATABASE_PATH` in `.env`. Relative database paths resolve
   against the project directory. Existing process environment takes precedence over `.env`.
-- `CHANNELS` in `config.py` must contain exactly six distinct channels. The bot needs admin
+- `CHANNELS` in `config.py` must contain exactly five distinct channels. The bot needs admin
   rights in each. `member`, `administrator`, `creator`/`owner`, and restricted users with
   `is_member=True` pass; pending join requests do not.
 - The legacy `CAMPAIGN_DATE`, `CAMPAIGN_TIME`, `CAMPAIGN_TIMEZONE`, `MATERIALS_URL` and
@@ -170,7 +192,7 @@ cd ~/lingua-bot
 ```
 
 This command loads `BOT_TOKEN` from the project's `.env` (process environment takes precedence),
-authenticates using `getMe`, and calls `getChatMember` for the bot in each of the six configured
+authenticates using `getMe`, and calls `getChatMember` for the bot in each of the five configured
 channels. It does not open SQLite, start polling, change webhooks, activate campaigns, or send
 messages. It can run alongside the existing Always-on task; no startup-script change is needed.
 The authenticated bot ID/username lets you confirm that you are checking the intended bot.
@@ -178,7 +200,7 @@ It checks bot access/admin rights, not any particular user's subscriptions.
 
 Each channel prints `channel_id`, `role=bot`, returned `status` (or `unavailable`), `category`,
 and a safe reason. Failures also include the Telegram exception class. The command continues
-through all six channels even if one fails. Exit codes: **0** = all six admin checks passed,
+through all five channels even if one fails. Exit codes: **0** = all five admin checks passed,
 **1** = one or more channel failures, **2** = configuration/authentication/setup failure.
 
 | Category | Meaning / action |
@@ -196,11 +218,12 @@ through all six channels even if one fails. Exit codes: **0** = all six admin ch
 
 Once the updated bot is manually restarted, pressing `ГОТОВО` adds detailed lines to its
 Always-on log. Search for `get_chat_member channel_id=` or `verification summary`.
-Verification normally makes **12 requests**: one bot check and one user check for each of six
+Verification normally makes **10 requests**: one bot check and one user check for each of five
 channels. `role=bot` versus `role=subscriber` identifies which request failed. If the bot access
 request fails, the user lookup for that channel is explicitly logged as skipped. A non-admin
 bot never establishes successful verification, even if a user lookup returns `member`.
-All six channels must still pass. Missing subscriptions and API/permission failures remain
+All five channels must still pass. A rate-limit response withholds remaining verification requests
+and delivery until retry; it never counts as successful verification. Missing subscriptions and API/permission failures remain
 separate, and API failures do not create eligible subscriber records.
 
 Logs contain channel IDs, statuses, elapsed milliseconds, exception types and allowlisted
@@ -218,6 +241,7 @@ Python 3.10+ is required. Existing dependencies remain unchanged:
 ```
 
 Tests use temporary SQLite databases, controlled clocks and mocked Telegram calls. They cover
-activation, inactive overdue campaigns, persistence/recovery, snapshot eligibility, six-channel
+immediate activation, explicit replacement of old overdue campaigns, persistence/recovery,
+preservation of 59 simulated legacy users, snapshot eligibility, five-channel
 rechecks, exact message content, preserved legacy records, safe retries, uncertain sends,
 duplicate prevention, CLI previews/activation, future dates, and startup/logging behavior.

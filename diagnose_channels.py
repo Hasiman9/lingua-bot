@@ -1,4 +1,4 @@
-"""Read-only Telegram diagnostics: getMe and six bot getChatMember checks only."""
+"""Read-only Telegram diagnostics: getMe and five bot getChatMember checks only."""
 import asyncio
 import logging
 import os
@@ -55,7 +55,7 @@ def main():
     try:
         config.validate_channels(config.CHANNELS)
     except ValueError:
-        logger.error("Invalid channel configuration: require six distinct @usernames or negative numeric IDs and join links")
+        logger.error("Invalid channel configuration: require five distinct @usernames or negative numeric IDs and join links")
         return 2
     return asyncio.run(run(token))
 

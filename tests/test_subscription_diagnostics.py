@@ -48,12 +48,12 @@ class SubscriptionDiagnosticTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.bot = SimpleNamespace(id=999, get_chat_member=AsyncMock())
 
-    async def test_all_twelve_calls_log_id_role_and_status(self):
+    async def test_all_ten_calls_log_id_role_and_status(self):
         self.bot.get_chat_member.return_value = SimpleNamespace(status='administrator')
         with self.assertLogs('subscriptions', level='INFO') as logs:
             result = await verify(self.bot, 42, config.CHANNELS)
         self.assertTrue(result.passed)
-        self.assertEqual(self.bot.get_chat_member.await_count, 12)
+        self.assertEqual(self.bot.get_chat_member.await_count, 10)
         for channel in config.CHANNELS:
             for role in ('bot', 'subscriber'):
                 self.assertTrue(any(f'channel_id={channel.chat_id} role={role} status=administrator' in line
@@ -108,16 +108,16 @@ class SubscriptionDiagnosticTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.category, 'ok' if active else 'missing_subscription')
             self.assertIn(f'is_member={active}', '\n'.join(logs.output))
 
-    async def test_read_only_diagnostic_calls_all_six_even_after_failure(self):
+    async def test_read_only_diagnostic_calls_all_five_even_after_failure(self):
         self.bot.get_chat_member.side_effect = [
             BadRequest('Chat not found'), SimpleNamespace(status='member'),
-            *[SimpleNamespace(status='administrator') for _ in range(4)],
+            *[SimpleNamespace(status='administrator') for _ in range(3)],
         ]
         with self.assertLogs(level='INFO') as logs:
             code = await diagnose_channels.diagnose(self.bot, config.CHANNELS)
         self.assertEqual(code, 1)
-        self.assertEqual(self.bot.get_chat_member.await_count, 6)
-        self.assertIn('administrator_ok=4 failed=2', '\n'.join(logs.output))
+        self.assertEqual(self.bot.get_chat_member.await_count, 5)
+        self.assertIn('administrator_ok=3 failed=2', '\n'.join(logs.output))
         for call, channel in zip(self.bot.get_chat_member.call_args_list, config.CHANNELS):
             self.assertEqual(call.kwargs, dict(chat_id=channel.chat_id, user_id=999))
 
@@ -137,8 +137,8 @@ class SubscriptionDiagnosticTests(unittest.IsolatedAsyncioTestCase):
             code = await diagnose_channels.run('123456:offline-test-token')
         self.assertEqual(code, 0)
         me.assert_awaited_once()
-        self.assertEqual(membership.await_count, 6)
-        self.assertIn('administrator_ok=6 failed=0', '\n'.join(logs.output))
+        self.assertEqual(membership.await_count, 5)
+        self.assertIn('administrator_ok=5 failed=0', '\n'.join(logs.output))
 
     async def test_diagnostic_auth_failure_is_safe(self):
         secret = 'hidden-auth-details'
