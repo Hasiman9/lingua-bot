@@ -56,21 +56,93 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
                     [tuple(r) for r in db.execute('SELECT * FROM campaign_recipients')])
 
     async def test_inactive_feature_only_verifies_and_registers(self):
-        await self.service.confirm(42)
+        with self.assertLogs('scheduler', level='INFO') as logs:
+            await self.service.confirm(42)
         self.assertIsNotNone(await self.db.get(42))
         self.assertIsNone(self.row())
         self.assertEqual(self.sends(), [])
         self.assertEqual(self.rewards.preview()['status'], 'inactive')
+        self.assertIn('reason=window_inactive', '\n'.join(logs.output))
+        self.bot.send_message.assert_awaited_once_with(chat_id=42, text='Вижу все подписки, спасибо! 💞')
 
     async def test_first_verification_sends_exact_message_without_another_click(self):
         self.activate()
-        await self.service.confirm(42)
+        with patch.object(self.service, 'tick', side_effect=AssertionError('Must not wait for scheduler')):
+            await self.service.confirm(42)
+        self.bot.send_message.assert_awaited_once()
         self.assertEqual(len(self.sends()), 1)
         self.assertEqual(self.sends()[0].kwargs, dict(chat_id=42, text=MESSAGE,
                          parse_mode=None, disable_web_page_preview=True))
         self.assertEqual(self.row()['status'], 'delivered')
-        self.assertEqual(self.bot.get_chat_member.await_count, 20)
+        self.assertEqual(self.bot.get_chat_member.await_count, 10)
         self.assertEqual(self.campaign_history(), ([], []))
+
+    async def test_delivered_only_after_telegram_accepts_the_inline_send(self):
+        self.activate()
+        started, accepted = asyncio.Event(), asyncio.Event()
+        async def send(**kwargs):
+            self.assertEqual(kwargs['text'], MESSAGE)
+            started.set()
+            await accepted.wait()
+        self.bot.send_message.side_effect = send
+        with self.assertLogs('scheduler', level='INFO') as logs:
+            task = asyncio.create_task(self.service.confirm(42))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                self.assertEqual(self.row()['status'], 'sending')
+                self.assertIsNone(self.row()['delivered_at'])
+                self.assertNotIn('delivery acknowledged', '\n'.join(logs.output))
+            finally:
+                accepted.set()
+                await task
+        self.assertEqual(self.row()['status'], 'delivered')
+        self.assertIn('delivery acknowledged', '\n'.join(logs.output))
+
+    async def test_inline_network_failure_is_uncertain_not_success_and_not_resent(self):
+        self.activate()
+        self.bot.send_message.side_effect = NetworkError('response lost')
+        with self.assertLogs('scheduler', level='INFO') as logs:
+            await self.service.confirm(42)
+        self.bot.send_message.assert_awaited_once()
+        self.assertEqual(self.row()['status'], 'uncertain')
+        self.assertIsNone(self.row()['delivered_at'])
+        self.assertNotIn('delivery acknowledged', '\n'.join(logs.output))
+        self.bot.send_message.side_effect = None
+        await self.service.confirm(42)
+        await self.service.tick()
+        self.assertEqual(len(self.sends()), 1)
+
+    async def test_inline_rate_limit_failure_is_pending_not_delivered(self):
+        self.activate()
+        self.bot.send_message.side_effect = RetryAfter(60)
+        await self.service.confirm(42)
+        self.bot.send_message.assert_awaited_once()
+        self.assertEqual(self.row()['status'], 'pending')
+        self.assertIsNone(self.row()['delivered_at'])
+        self.bot.send_message.side_effect = None
+        with self.assertLogs('scheduler', level='INFO') as logs:
+            await self.service.confirm(42)
+        self.assertIn('reason=telegram_cooldown', '\n'.join(logs.output))
+        self.assertEqual(len(self.sends()), 1)
+        self.now += 60
+        await self.service.tick()
+        self.assertEqual(self.row()['status'], 'delivered')
+
+    async def test_duplicate_callback_logs_already_rewarded_without_resending(self):
+        self.activate()
+        await self.service.confirm(42)
+        with self.assertLogs('scheduler', level='INFO') as logs:
+            await self.service.confirm(42)
+        self.assertIn('reason=reward_delivered', '\n'.join(logs.output))
+        self.assertEqual(len(self.sends()), 1)
+
+    async def test_user_verified_before_activation_does_not_silently_become_new(self):
+        await self.service.confirm(42)
+        self.activate()
+        with self.assertLogs('scheduler', level='INFO') as logs:
+            await self.service.confirm(42)
+        self.assertIn('reason=not_new_during_window', '\n'.join(logs.output))
+        self.assertEqual(self.sends(), [])
 
     async def test_existing_users_never_enroll_even_with_new_confirmation(self):
         await self.db.schedule(42, 1, 100)
@@ -90,7 +162,9 @@ class RewardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.sends()), 1)
         for uid, now in ((43, expiry), (44, expiry + 1)):
             self.now = now
-            await self.service.confirm(uid)
+            with self.assertLogs('scheduler', level='INFO') as logs:
+                await self.service.confirm(uid)
+            self.assertIn('reason=window_expired', '\n'.join(logs.output))
             self.assertIsNotNone(await self.db.get(uid))
             self.assertIsNone(self.row(uid))
         self.assertEqual(len(self.sends()), 1)

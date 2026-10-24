@@ -48,6 +48,30 @@ class RewardStore(CampaignStore):
                         deliveries=[dict(r) for r in db.execute(
                             'SELECT status,count(*) AS count FROM reward_deliveries GROUP BY status')])
 
+    def explain(self, user_id, now):
+        """Read-only explanation when this user's reward cannot be claimed inline."""
+        with closing(self.connect(readonly=True)) as db:
+            db.execute('BEGIN')
+            window = db.execute('SELECT * FROM reward_window WHERE id=1').fetchone()
+            if not window:
+                return 'window_inactive'
+            if now >= window['expires_at']:
+                return 'window_expired'
+            if now < window['activated_at']:
+                return 'before_activation_time'
+            row = db.execute('SELECT * FROM reward_deliveries WHERE user_id=?', (user_id,)).fetchone()
+            if row and row['status'] != 'pending':
+                return 'reward_' + row['status']
+            if has_materials_receipt(db, user_id):
+                return 'prior_materials_receipt'
+            if row is None:
+                return 'not_new_during_window'
+            if db.execute('SELECT not_before FROM delivery_control WHERE id=1').fetchone()[0] > now:
+                return 'telegram_cooldown'
+            if row['next_attempt_at'] > now:
+                return 'retry_backoff'
+            return 'claimed_by_another_worker'
+
     def claim(self, now, user_id=None):
         with closing(self.connect()) as db, db:
             db.execute('BEGIN IMMEDIATE')

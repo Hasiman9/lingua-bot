@@ -22,8 +22,11 @@ including after expiry: neither a restart nor another command can extend the dea
 No background cron task or startup-script change is needed.
 
 After successful verification, an enrolled user automatically receives the exact materials
-message shown below, with no further `/start` or button click. A short pacing wait and fresh
-five-channel check precede sending. Telegram/API errors retry automatically while the window
+message shown below, with no further `/start` or button click. The callback reuses its just-passed
+five-channel verification and sends the materials inline after a short rate-limit pacing wait.
+It does not send a separate pre-delivery promise or wait for the campaign tick. The materials
+message itself is the success response; delivery is recorded/logged only after Telegram accepts
+the request. Background retries perform fresh five-channel verification. Telegram/API errors retry automatically while the window
 remains active, using the existing persistent rate-limit cooldown. After expiry, queued/retrying
 rewards are withheld and verification continues normally. The deadline is checked again when
 reserving a send and immediately before the API call. A request already in flight before the
@@ -68,6 +71,46 @@ the persisted deadline even if the bot is stopped. Pending rows are marked expir
 scheduler scan; a read-only status command does not rewrite their history. All three CLI commands
 are offline and never call Telegram or send messages. Activation inserts only the window, no
 recipient snapshot. **Use `reward.py`, not `campaign.py activate`, for this feature.**
+
+### Troubleshoot a missing inline reward
+
+The earlier reward implementation already attempted delivery inside the callback, but sent the
+generic subscription acknowledgment first. That acknowledgment could fail before the reward
+attempt, and its wording incorrectly suggested a future mailing. A successful membership reply
+alone did not prove the window was active or the user was eligible. The updated flow sends the
+materials first and logs why it cannot send; it never promises a later delivery.
+
+Read-only deployment checks in PythonAnywhere's Bash console:
+
+```bash
+cd ~/lingua-bot
+git log -1 --format='%H %s'
+.venv/bin/python reward.py status
+```
+
+Compare the commit with GitHub and the printed database path with the Always-on startup log.
+The running updated process logs `reward_flow=inline-v2` at startup, along with the database,
+window status and UTC Unix expiry. Updating files alone does not update an already running
+Python process. The startup status is a snapshot; `reward.py status` reads the current window.
+Use the same environment/database path as the task, including any exported `DATABASE_PATH`.
+
+Each successful callback logs `reward_inline user_id=...` and either `action=send_attempt` or
+`action=withheld reason=...`. Interpret the reasons as follows:
+
+- `window_inactive`: no explicit activation in this database. Activate only when intended.
+- `window_expired`: the stored 72-hour deadline passed; another activation cannot extend it.
+- `not_new_during_window`: this user already verified previously, including before activation.
+  Another click does not make them new. Do not reset subscriber records to bypass this rule.
+- `reward_delivered` / `prior_materials_receipt`: reward/campaign history prevents a duplicate;
+  a prior receipt may also represent an uncertain outcome.
+- `reward_uncertain` / `reward_sending` / `reward_processing`: the send is held or in progress.
+- `telegram_cooldown` / `retry_backoff`: a Telegram failure prevents an immediate attempt;
+  safe retries run automatically before expiry, without promising successful delivery.
+
+`Materials delivery acknowledged ... source=reward` is logged only after Telegram accepted the
+send and SQLite recorded delivery. A timeout is held as uncertain, not marked delivered. No
+automatic command can diagnose the live process from the repository alone: production status
+and log output are needed to distinguish missing deployment/activation from API failures.
 
 ## One-time delivery policy
 

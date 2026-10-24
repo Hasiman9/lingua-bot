@@ -85,6 +85,9 @@ async def on_startup(application):
     service = DeliveryService(db, application.bot, config.CHANNELS, settings.materials_url,
                               settings.campaign_at, message=settings.materials_message)
     application.bot_data["service"] = service
+    reward_state = service.rewards.preview()
+    logger.info('reward_flow=inline-v2 database=%s window_status=%s expires_at_utc_unix=%s',
+                settings.database_path, reward_state['status'], reward_state['expires_at'])
     logger.info("Registering /start command with Telegram")
     await application.bot.set_my_commands([BotCommand("start", "Start")])
     logger.info("Registering delivery scheduler job (interval=%s seconds)", config.POLL_SECONDS)
