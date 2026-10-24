@@ -1,7 +1,6 @@
 """Polling entry point. Only /start and the single verification callback are handled."""
 import logging
 import os
-import re
 import sys
 
 from filelock import FileLock, Timeout
@@ -14,19 +13,9 @@ from campaigns import CampaignStore
 from materials import validate_materials
 from scheduler import DeliveryService
 from subscriptions import keyboard
+from safe_logging import RedactingFormatter
 
 logger = logging.getLogger(__name__)
-
-
-class RedactingFormatter(logging.Formatter):
-    """Redact tokens after formatting, including exception messages and tracebacks."""
-    token = ""
-
-    def format(self, record):
-        text = super().format(record)
-        if self.token:
-            text = text.replace(self.token, "<BOT_TOKEN_REDACTED>")
-        return re.sub(r"\b\d{6,}:[A-Za-z0-9_-]{20,}", "<BOT_TOKEN_REDACTED>", text)
 
 
 class LoggedApplication(Application):

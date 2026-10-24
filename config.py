@@ -28,6 +28,9 @@ CHANNELS = (
     Channel("@shek_english", "Шекспирыч 🇬🇧🇨🇳language school", "https://t.me/+-uqXj5TiTeQ4OWJi"),
 )
 # Private channel example: Channel(-1001234567890, "Private channel", "https://t.me/+REAL_INVITE")
+# chat_id must resolve to the actual required channel, independently of the join URL.
+# An invite link does not prove that an @username is correct or accessible to this bot.
+# Check access/admin status with: python diagnose_channels.py (no database or delivery access).
 
 WELCOME = (
     "Hi! Спасибо, что присоединились к нашей осенней рассылке 🤎🍂\n\n"

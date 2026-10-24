@@ -160,6 +160,54 @@ separate change; changing the campaign ID alone does not resend these materials.
 - Keep `.env` and the persistent database through updates. Do not delete the database or
   copy a local test database over production. Use SQLite's backup API for consistent backups.
 
+## Diagnose subscription verification on PythonAnywhere
+
+After manually deploying these files, run from the existing project/virtualenv:
+
+```bash
+cd ~/lingua-bot
+.venv/bin/python diagnose_channels.py
+```
+
+This command loads `BOT_TOKEN` from the project's `.env` (process environment takes precedence),
+authenticates using `getMe`, and calls `getChatMember` for the bot in each of the six configured
+channels. It does not open SQLite, start polling, change webhooks, activate campaigns, or send
+messages. It can run alongside the existing Always-on task; no startup-script change is needed.
+The authenticated bot ID/username lets you confirm that you are checking the intended bot.
+It checks bot access/admin rights, not any particular user's subscriptions.
+
+Each channel prints `channel_id`, `role=bot`, returned `status` (or `unavailable`), `category`,
+and a safe reason. Failures also include the Telegram exception class. The command continues
+through all six channels even if one fails. Exit codes: **0** = all six admin checks passed,
+**1** = one or more channel failures, **2** = configuration/authentication/setup failure.
+
+| Category | Meaning / action |
+| --- | --- |
+| `ok` | The bot is an administrator (in verification logs, the user is subscribed). |
+| `insufficient_admin` | Add/promote this exact bot as administrator in the channel; `status=member`, `left`, or `kicked` is not sufficient. Telegram can also explicitly reject membership-list access. |
+| `channel_id_or_access` | Telegram could not resolve/access the channel. Check its current public username or use the actual negative numeric channel ID for a private channel. `chat not found` alone cannot prove which cause applies. |
+| `access_denied` | Check whether the bot was removed/banned or cannot access the channel. |
+| `timeout` / `network_error` | Check PythonAnywhere outbound Telegram access/network/proxy settings; rerun after connectivity recovers. |
+| `rate_limited` | Telegram asked for a retry later; wait before rerunning. |
+| `authentication_error` | Check that the environment uses the correct, valid bot token. Do not share the token. |
+| `invalid_user` | The user ID could not be resolved by Telegram. |
+| `api_bad_request` / `api_error` | Telegram rejected the request for another reason; retain the channel ID and exception class for investigation. |
+| `missing_subscription` | User lookup succeeded but returned no active subscription; this is not an API failure. |
+
+Once the updated bot is manually restarted, pressing `ГОТОВО` adds detailed lines to its
+Always-on log. Search for `get_chat_member channel_id=` or `verification summary`.
+Verification normally makes **12 requests**: one bot check and one user check for each of six
+channels. `role=bot` versus `role=subscriber` identifies which request failed. If the bot access
+request fails, the user lookup for that channel is explicitly logged as skipped. A non-admin
+bot never establishes successful verification, even if a user lookup returns `member`.
+All six channels must still pass. Missing subscriptions and API/permission failures remain
+separate, and API failures do not create eligible subscriber records.
+
+Logs contain channel IDs, statuses, elapsed milliseconds, exception types and allowlisted
+error descriptions. Arbitrary raw exception text, request URLs, tokens and invite links are
+not logged by these checks. Unknown API error text is intentionally omitted to avoid leaking secrets.
+Do not infer a particular failing channel from the old generic user-facing error alone.
+
 ## Local tests
 
 Python 3.10+ is required. Existing dependencies remain unchanged:
